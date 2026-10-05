@@ -23,6 +23,8 @@ permissions:
 jobs:
   apk:
     name: Signed APK
+    # Skipped until the keystore secrets are configured (repo owner decision).
+    if: ${{ vars.ANDROID_SIGNING_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -136,11 +138,11 @@ jobs:
       - run: "[ -d android/app ] || npx cap add android"
       - run: node tools/build-web.mjs
       - run: npx cap sync android
-      - run: ./gradlew assembleRelease --no-daemon
+      - run: ./gradlew bundleRelease --no-daemon
         working-directory: android
       - name: Upload AAB
         uses: actions/upload-artifact@v4
         with:
           name: stockpilot-aab
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
