@@ -1,11 +1,34 @@
 # StockPilot
 
 **Multi-warehouse inventory intelligence, refill decisions and purchase planning** — built as a
-mobile-first web app, bundled as an installable PWA, and ready to wrap as an Android APK.
+mobile-first web app, shipped as an installable PWA, and packaged as a signed Android APK.
 
-- Source sheet: [Web-App_Inventory Data](https://docs.google.com/spreadsheets/d/1yFF3xhseJdsJQFRnyQYP9P3qakIhoDECITxTJclE39Y/edit?usp=sharing)
-- Snapshot baked in at build time: **38 SKUs · 4,433 units · 4 warehouses**
-- No build step, no framework, no npm runtime dependencies.
+## Live
+
+| | |
+|---|---|
+| **Web app** | **https://abraar05.github.io/StockPilot/** |
+| **Android APK** | **https://github.com/abraar05/StockPilot/releases/download/v1.0.0/StockPilot-1.0.0.apk** |
+| Source | https://github.com/abraar05/StockPilot |
+
+Install the APK on a phone, or add the web app to your home screen — both run the same
+codebase and work fully offline after first load.
+
+**APK** - `app.stockpilot.inventory` - 2.98 MB - Android 5.1+ (API 22 to 34) -
+signed RSA 2048 (schemes v1 + v2) -
+SHA-256 `081722F1845FCA4ADC06CE37F030A4A35C526EA0E28D52019ED7B8A39662445B`
+
+```bash
+adb install -r StockPilot-1.0.0.apk     # or copy the APK to the phone and open it
+```
+
+Sign in with `admin@stockpilot.app` / `Admin@1234`.
+
+---
+
+Source sheet: [Web-App_Inventory Data](https://docs.google.com/spreadsheets/d/1yFF3xhseJdsJQFRnyQYP9P3qakIhoDECITxTJclE39Y/edit?usp=sharing)
+Snapshot baked in at build time: **38 SKUs - 4,433 units - 4 warehouses**
+No build step, no framework, no runtime dependencies.
 
 ---
 
@@ -124,11 +147,17 @@ The status pill turns green in the sidebar once connected.
 
 ## Publish it
 
-Any static host works — there is nothing to compile.
+**Already live** at https://abraar05.github.io/StockPilot/ — served straight from this repo by
+GitHub Pages (free, no card, no build step). Push to `main` and the site updates.
+
+The build is now automated for Android too: `.github/workflows/android-apk.yml` produces a
+signed APK on every tag and attaches it to the release.
+
+Any other host works as well — there is nothing to compile.
 
 | Option | How |
 |---|---|
-| **GitHub Pages** | Push, then Settings → Pages → deploy from branch, root |
+| **GitHub Pages** (current) | Settings → Pages → deploy from `main`, root. Done. |
 | **Netlify / Vercel** | Drag the folder, or connect the repo. No build command, publish dir `.` |
 | **Cloudflare Pages** | Same — no framework preset, output `.` |
 | **Google Apps Script** | Host `index.html` + `assets/` in the script project so it shares the bridge's origin (no CORS at all) |
@@ -137,34 +166,37 @@ Any static host works — there is nothing to compile.
 Bump the `?v=` query on every `<link>`/`<script>` in `index.html` when you ship a change — it is
 the cache-buster, and `sw.js` uses the same string as its cache version.
 
-Service workers require **HTTPS or localhost**. On plain-HTTP LAN addresses the app still works
-fully, just without the offline cache.
+Service workers require **HTTPS or localhost**. The published site is HTTPS, so offline works.
+On a plain-HTTP LAN address the app still functions fully, just without the offline cache.
 
 ---
 
 ## Android APK
 
-See **[tools/build-android.md](tools/build-android.md)** for the full walkthrough. In short:
+**Download:** https://github.com/abraar05/StockPilot/releases/download/v1.0.0/StockPilot-1.0.0.apk
+
+The shipped APK is built from `www/` (assembled by `tools/build-web.mjs`), signed with the
+release keystore, and bundles the complete app — so it opens and works with no network.
+
+To rebuild locally:
 
 ```bash
 npm install
-npx cap add android
+node tools/build-web.mjs
+npx cap add android          # first time only
 npx cap sync android
 npm run android:apk          # android/app/build/outputs/apk/release/app-release.apk
 ```
 
-Or build a signed APK in the cloud with **no local Android Studio** — push the repo and run the
-included GitHub Actions workflow:
+To rebuild in the cloud with no Android Studio, push a tag and run the included workflow
+(`.github/workflows/android-apk.yml`); it attaches the APK to the GitHub Release.
 
-```
-.github/workflows/android-apk.yml
-```
+Signing resolves automatically from `android/keystore.properties` locally, or from the
+`ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` secrets in CI. Run
+`gradlew stockpilotSigning` to see which one is in play.
 
-Set three repository secrets (`ANDROID_KEYSTORE_B64`, `ANDROID_KEY_ALIAS`,
-`ANDROID_KEY_PASSWORD`), trigger the workflow, and download `stockpilot-apk` from the run summary.
-
-The APK installs the whole web app, so it works fully offline out of the box on the bundled
-snapshot; paste the Apps Script bridge URL in Settings on first run to enable write-back.
+Full walkthrough — keystore creation, Play Store AAB, icons, gotchas:
+**[tools/build-android.md](tools/build-android.md)**.
 
 ---
 
@@ -172,7 +204,7 @@ snapshot; paste the Apps Script bridge URL in Settings on first run to enable wr
 
 ```
 index.html                 app shell + inlined SVG sprite
-capacitor.config.js        Android packaging
+capacitor.config.js        Android packaging (webDir = www/)
 package.json               scripts + Capacitor deps
 sw.js                      offline shell (service worker)
 manifest                   PWA metadata (assets/manifest.webmanifest)
@@ -199,7 +231,10 @@ js/
   modules/                 one file per module
 
 gas/Code.gs                Apps Script bridge (read + write + audit log)
+www/                       GENERATED web bundle for the native shell
+dist/                      GENERATED build artefacts (APK)
 tools/
+  build-web.mjs            assembles www/ for Capacitor
   build-seed.mjs           regenerates js/seed.js from the live sheet
   build-android.md         APK walkthrough
   responsive.html          side-by-side 360/390/430 preview harness
