@@ -63,6 +63,9 @@ jobs:
       - name: Add Android platform
         run: "[ -d android/app ] || npx cap add android"
 
+      - name: Build web bundle
+        run: node tools/build-web.mjs
+
       - name: Sync web assets
         run: npx cap sync android
 
@@ -131,6 +134,7 @@ jobs:
           java-version: '17'
       - run: npm ci
       - run: "[ -d android/app ] || npx cap add android"
+      - run: node tools/build-web.mjs
       - run: npx cap sync android
       - run: ./gradlew assembleRelease --no-daemon
         working-directory: android
