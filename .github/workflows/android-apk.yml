@@ -76,8 +76,8 @@ jobs:
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
-          echo "$ANDROID_KEYSTORE_B64" | base64 -d > stockpilot-upload.jks
-          ls -l stockpilot-upload.jks
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > stockpilot-upload.p12
+          ls -l stockpilot-upload.p12
 
       - name: Build release APK
         working-directory: android

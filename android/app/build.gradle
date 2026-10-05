@@ -17,6 +17,8 @@ def searchPaths = []
 if (keystoreProps['storeFile']) {
     searchPaths.add(keystoreProps['storeFile'])
 }
+searchPaths.add('stockpilot-upload.p12')
+searchPaths.add('../stockpilot-upload.p12')
 searchPaths.add('stockpilot-upload.jks')
 searchPaths.add('../stockpilot-upload.jks')
 
@@ -52,6 +54,9 @@ android {
     signingConfigs {
         release {
             if (isSigned) {
+                if (keystoreFile.name.endsWith('.p12') || keystoreFile.name.endsWith('.pfx')) {
+                    setStoreType('PKCS12')
+                }
                 setStoreFile(keystoreFile)
                 setStorePassword(storePass)
                 setKeyAlias(aliasName)
