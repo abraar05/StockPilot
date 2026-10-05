@@ -73,38 +73,17 @@ jobs:
 
       - name: Decode keystore
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
-          echo "$ANDROID_KEYSTORE_B64" | base64 -d > app/stockpilot-upload.jks
-          ls -l app/stockpilot-upload.jks
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > stockpilot-upload.jks
+          ls -l stockpilot-upload.jks
 
-      - name: Write signing config
+      - name: Build release APK
         working-directory: android
         env:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          cat >> app/build.gradle <<'EOF'
-
-          android {
-            signingConfigs {
-              release {
-                storeFile file('stockpilot-upload.jks')
-                storePassword System.getenv('ANDROID_KEY_PASSWORD')
-                keyAlias System.getenv('ANDROID_KEY_ALIAS')
-                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
-              }
-            }
-            buildTypes {
-              release {
-                signingConfig signingConfigs.release
-                minifyEnabled false
-              }
-            }
-          }
-          EOF
-
-      - name: Build release APK
-        working-directory: android
         run: ./gradlew assembleRelease --no-daemon
 
       - name: Upload APK to the run
