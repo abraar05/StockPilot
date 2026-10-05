@@ -61,7 +61,7 @@ jobs:
         run: npm ci
 
       - name: Add Android platform
-        run: npx cap add android
+        run: [ -d android/app ] || npx cap add android
 
       - name: Sync web assets
         run: npx cap sync android
@@ -130,7 +130,7 @@ jobs:
           distribution: temurin
           java-version: '17'
       - run: npm ci
-      - run: npx cap add android
+      - run: [ -d android/app ] || npx cap add android
       - run: npx cap sync android
       - run: ./gradlew assembleRelease --no-daemon
         working-directory: android
