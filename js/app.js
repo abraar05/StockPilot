@@ -9,7 +9,6 @@ SP.app = (() => {
   let paletteItems = [];
   let alertTimer = null;
 
-  /** Lazy DOM lookups: the shell may not exist yet when this module evaluates. */
   const $ = (id) => document.getElementById(id);
 
   /* ═════════════════════════════════════════════════════════════ BOOT */
@@ -18,10 +17,10 @@ SP.app = (() => {
     hint('Loading your workspace…');
     try { SP.store.load(); } catch (e) { console.warn('[boot] store', e); }
 
-    // First run: hydrate the catalogue from the sheet snapshot.
-    if (!SP.store.state.skus.length) {
-      hint('Reading the inventory snapshot…');
-      SP.store.hydrateFromSeed();
+    // First run: convert the bundled snapshot into v3 demo data.
+    if (!SP.store.state.products.length && SP.SEED) {
+      hint('Preparing the demo catalogue…');
+      SP.seed2.hydrate();
       SP.store.saveNow();
     }
 
@@ -30,14 +29,6 @@ SP.app = (() => {
 
     hint('Restoring session…');
     const user = await SP.auth.restore();
-
-    // Validate the bundle is consistent with the schema we expect.
-    const shapeCheck = SP.store.state.skus.every((s) => s.colours && typeof s.colours === 'object');
-    if (!shapeCheck) {
-      console.warn('[boot] catalogue shape mismatch — rehydrating from seed');
-      SP.store.hydrateFromSeed();
-      SP.store.saveNow();
-    }
 
     applyTheme();
     wireChrome();
@@ -48,11 +39,6 @@ SP.app = (() => {
 
     if (user) enterApp(user);
     else showAuth();
-
-    // Refresh the live view in the background without blocking first paint.
-    if (SP.sheet.autoSyncMinutes > 0 && navigator.onLine) {
-      setTimeout(() => { SP.sheets.refresh().then((r) => { if (r.ok) SP.router.refresh(); }); }, 1400);
-    }
 
     setTimeout(() => document.getElementById('boot')?.classList.add('is-done'), 260);
   }
@@ -65,17 +51,15 @@ SP.app = (() => {
   /* ═════════════════════════════════════════════════════════════ AUTH */
 
   function showAuth() {
-    $("app").hidden = true;
-    $("auth").hidden = false;
+    $('app').hidden = true;
+    $('auth').hidden = false;
     document.documentElement.dataset.theme = currentTheme();
-    const u = SP.auth.currentUser;
-    document.getElementById('avatarInitials') && (document.getElementById('avatarInitials').textContent = SP.fmt.initials(u?.name || '··'));
   }
 
   async function enterApp(user) {
-    $("auth").hidden = true;
-    $("app").hidden = false;
-    $("app").classList.add('is-booting');
+    $('auth').hidden = true;
+    $('app').hidden = false;
+    $('app').classList.add('is-booting');
 
     document.getElementById('avatarInitials').textContent = SP.fmt.initials(user.name);
 
@@ -83,19 +67,13 @@ SP.app = (() => {
     buildNav();
     SP.router.start(paintChrome);
 
-    // Force a layout pass before the fade-in.
-    requestAnimationFrame(() => {
-      $("app").classList.remove('is-booting');
-    });
+    requestAnimationFrame(() => { $('app').classList.remove('is-booting'); });
 
-    // First-run onboarding.
-    if (!SP.store.state.onboarded) {
-      setTimeout(() => openOnboarding(), 520);
-    }
+    if (!SP.store.state.onboarded) setTimeout(() => openOnboarding(), 520);
 
-    // Alert poll.
     refreshAlerts();
-    alertTimer = setInterval(refreshAlerts, 60000);
+    SP.alerts.generate();
+    alertTimer = setInterval(() => { SP.alerts.generate(); refreshAlerts(); }, 60000);
 
     SP.announce(`Signed in as ${user.name}`);
   }
@@ -121,7 +99,7 @@ SP.app = (() => {
     const backBtn = root.querySelector('[data-ob="back"]');
 
     const draft = {
-      role: SP.store.state.prefs.role,
+      role: SP.auth.current()?.role || 'viewer',
       warehouse: SP.store.state.prefs.warehouse,
       alerts: SP.store.state.prefs.alerts,
     };
@@ -133,52 +111,39 @@ SP.app = (() => {
       {
         title: 'What brings you here?',
         sub: 'We tailor the dashboard to your role.',
-        render: () => SP.el('div.role-picker', ...SP.ROLES.filter((r) => r.id !== 'admin').map((r) =>
-          choice(r.icon === 'shield' ? 'shield' : r.id === 'manager' ? 'chart' : r.id === 'storekeeper' ? 'box' : 'eye',
-            r.label, r.blurb, draft.role === r.id, () => {
-              draft.role = r.id;
-              draw();
-            }))),
+        render: () => SP.el('div.role-picker', ...SP.ROLES.filter((r) => !['admin'].includes(r.id)).slice(0, 5).map((r) =>
+          choice(r.id === 'warehouse_manager' ? 'chart' : r.id === 'warehouse_staff' ? 'box' : r.id === 'salesperson' ? 'truck' : 'eye',
+            r.label, r.blurb, draft.role === r.id, () => { draft.role = r.id; draw(); }))),
       },
       {
-        title: 'Which site do you look after?',
+        title: 'Which warehouse do you look after?',
         sub: 'Sets the warehouse your dashboards open on.',
-        render: () => SP.el('div.role-picker', ...SP.store.state.warehouses.map((w) =>
-          choice('home', w.label, `${SP.fmt.n(SP.sum(SP.store.state.skus, (s) => Number(s.byWh?.[w.id]) || 0))} units held`,
-            draft.warehouse === w.id, () => { draft.warehouse = w.id; draw(); }))),
+        render: () => SP.el('div.role-picker',
+          choice('grid', 'All warehouses', 'See the whole network', draft.warehouse === '*', () => { draft.warehouse = '*'; draw(); }),
+          ...SP.store.state.warehouses.map((w) =>
+            choice('home', w.name, `${SP.fmt.n(SP.ledger.summary({ warehouse: w.id }).gross)} units held`,
+              draft.warehouse === w.id, () => { draft.warehouse = w.id; draw(); }))),
       },
       {
         title: 'How should we alert you?',
         sub: 'You can change this any time in Settings.',
         render: () => SP.el('div.stacklist',
           SP.el('label.switch',
-            SP.el('input', {
-              type: 'checkbox', checked: draft.alerts.enabled,
-              onchange: (e) => { draft.alerts.enabled = e.target.checked; },
-            }),
+            SP.el('input', { type: 'checkbox', checked: draft.alerts.enabled, onchange: (e) => { draft.alerts.enabled = e.target.checked; } }),
             SP.el('span.switch__track'),
-            SP.el('span.switch__text', SP.el('strong', 'Enable alerts'), SP.el('small', 'Badges and the notification centre')),
-          ),
+            SP.el('span.switch__text', SP.el('strong', 'Enable alerts'), SP.el('small', 'Badges and the alert center'))),
           SP.el('label.switch',
-            SP.el('input', {
-              type: 'checkbox', checked: draft.alerts.onlyCritical,
-              onchange: (e) => { draft.alerts.onlyCritical = e.target.checked; },
-            }),
+            SP.el('input', { type: 'checkbox', checked: draft.alerts.onlyCritical, onchange: (e) => { draft.alerts.onlyCritical = e.target.checked; } }),
             SP.el('span.switch__track'),
-            SP.el('span.switch__text', SP.el('strong', 'Only critical alerts'), SP.el('small', 'Just out-of-stock lines')),
-          ),
-        ),
+            SP.el('span.switch__text', SP.el('strong', 'Only critical alerts'), SP.el('small', 'Out-of-stock and discrepancies')))),
       },
     ];
 
-    function choice(icon, label, sub, active, onClick) {
-      return SP.el('button.onboard__choice', {
-        type: 'button', class: active ? 'is-active' : '', onclick: onClick,
-      },
+    function choice(icon, label, subText, active, onClick) {
+      return SP.el('button.onboard__choice', { type: 'button', class: active ? 'is-active' : '', onclick: onClick },
         SP.el('span.onboard__choice-ico', SP.icon(icon)),
-        SP.el('div.grow', SP.el('strong', label), SP.el('small', sub)),
-        active ? SP.el('span', { style: { color: 'var(--brand)' } }, SP.icon('check')) : null,
-      );
+        SP.el('div.grow', SP.el('strong', label), SP.el('small', subText)),
+        active ? SP.el('span', { style: { color: 'var(--brand)' } }, SP.icon('check')) : null);
     }
 
     function draw() {
@@ -195,7 +160,6 @@ SP.app = (() => {
     nextBtn.onclick = () => {
       if (stepIndex < steps.length - 1) { stepIndex += 1; draw(); return; }
       SP.store.update(['prefs', 'onboarded'], (st) => {
-        st.prefs.role = draft.role;
         st.prefs.warehouse = draft.warehouse;
         st.prefs.alerts = { ...st.prefs.alerts, ...draft.alerts };
         st.onboarded = true;
@@ -203,11 +167,7 @@ SP.app = (() => {
       document.getElementById('onboard').hidden = true;
       document.getElementById('signinForm').hidden = false;
       SP.router.refresh();
-      SP.ui.toast({
-        tone: 'ok', title: 'All set', duration: 4200,
-        body: 'Tip: press Ctrl+K to search anything.',
-        action: { label: 'Show me around', onClick: () => SP.router.go('help') },
-      });
+      SP.ui.toast({ tone: 'ok', title: 'All set', duration: 4200, body: 'Tip: press Ctrl+K to search anything.' });
     };
 
     backBtn.onclick = () => { if (stepIndex > 0) { stepIndex -= 1; draw(); } };
@@ -228,13 +188,12 @@ SP.app = (() => {
       navHost.appendChild(SP.el('div.sidenav__group', group.group));
       for (const item of visible) {
         navHost.appendChild(SP.el('button.navlink', {
-          type: 'button',
-          dataset: { route: item.route },
+          type: 'button', dataset: { route: item.route },
           onclick: () => { SP.router.go(item.route); closeNav(); },
         },
           SP.icon(item.icon),
           SP.el('span.grow', item.label),
-          SP.el('span.navlink__count', { dataset: { role: item.route } }, ''),
+          SP.el('span.navlink__count', { dataset: { role: item.route }, hidden: true }, ''),
         ));
       }
     }
@@ -242,10 +201,11 @@ SP.app = (() => {
     // Bottom tabs
     for (const key of SP.TABS) {
       if (key === 'more') {
-        tabHost.appendChild(SP.el('button.tab', {
-          type: 'button', dataset: { tab: '__more' },
-          onclick: openMoreSheet,
-        }, SP.icon('menu'), SP.el('span', 'More')));
+        tabHost.appendChild(SP.el('button.tab', { type: 'button', dataset: { tab: '__more' }, onclick: openMoreSheet }, SP.icon('menu'), SP.el('span', 'More')));
+        continue;
+      }
+      if (key === 'actions') {
+        tabHost.appendChild(SP.el('button.tab.tab--action', { type: 'button', dataset: { tab: '__actions' }, onclick: openActionSheet }, SP.icon('plus'), SP.el('span', 'Actions')));
         continue;
       }
       const item = SP.NAV.flatMap((g) => g.items).find((i) => i.route === key && i.tab);
@@ -258,185 +218,139 @@ SP.app = (() => {
     }
   }
 
+  /** Mobile primary actions: scan / receive / transfer / pick / verify / sell. */
+  function openActionSheet() {
+    const body = SP.el('div.grid.grid--3.gap-2', ...SP.MOBILE_ACTIONS
+      .filter((a) => SP.auth.can(a.perm))
+      .map((a) => SP.el('button.card.card--pad', {
+        type: 'button', style: { textAlign: 'center' },
+        onclick: () => {
+          shell.close();
+          if (a.id === 'scan') { SP.modules.devices.registerForm ? scanFlow() : null; }
+          else SP.router.go(a.route, a.params || {});
+        },
+      },
+        SP.el('span.lrow__ico', { style: { margin: '0 auto var(--sp-2)' } }, SP.icon(a.icon)),
+        SP.el('strong', { style: { fontSize: 'var(--fs-sm)', display: 'block' } }, a.label))));
+    const shell = SP.sheet({ title: 'Warehouse actions', content: body });
+  }
+
+  async function scanFlow() {
+    const input = SP.el('input.input', { placeholder: 'Type or scan IMEI / serial…', inputmode: 'numeric' });
+    const shell = SP.sheet({
+      title: 'Scan / find device',
+      content: SP.el('div.stack.gap-2', input,
+        SP.el('button.btn.btn--primary.btn--block', { type: 'button', onclick: () => { shell.close(); SP.modules.devices.quickFind(input.value); } }, 'Find device')),
+    });
+    SP.ui2.scanInto(input, (value) => { shell.close(); SP.modules.devices.quickFind(value); });
+  }
+
   function openMoreSheet() {
     const s = SP.store.state;
     const body = SP.el('div.stacklist');
     const shell = SP.sheet({ title: 'All modules', content: body });
-    body.appendChild(SP.el('div.grid.grid--2', ...SP.NAV.flatMap((g) => g.items
-      .filter((i) => !i.perm || SP.auth.can(i.perm))
-      .map((i) => SP.el('button.card.card--pad', {
-        type: 'button', style: { textAlign: 'left' },
+    for (const group of SP.NAV) {
+      const visible = group.items.filter((i) => !i.perm || SP.auth.can(i.perm));
+      if (!visible.length) continue;
+      body.appendChild(SP.el('div.sidenav__group', { style: { padding: '8px 4px 2px' } }, group.group));
+      body.appendChild(SP.el('div.grid.grid--3.gap-2', ...visible.map((i) => SP.el('button.card.card--pad', {
+        type: 'button', style: { textAlign: 'center' },
         onclick: () => { shell.close(); SP.router.go(i.route); },
       },
-        SP.el('span.lrow__ico', { style: { marginBottom: 'var(--sp-2)' } }, SP.icon(i.icon)),
-        SP.el('strong', { style: { fontSize: 'var(--fs-md)', display: 'block' } }, i.label),
-      )))));
-
+        SP.el('span.lrow__ico', { style: { margin: '0 auto var(--sp-2)' } }, SP.icon(i.icon)),
+        SP.el('strong', { style: { fontSize: 'var(--fs-sm)', display: 'block' } }, i.label)))));
+    }
     body.appendChild(SP.el('div', { style: { marginTop: 'var(--sp-3)' } },
-      SP.el('div.conn', { dataset: { state: s.sheet.mode } },
+      SP.el('div.conn', { dataset: { state: connState() } },
         SP.el('span.conn__led'),
-        SP.el('span.conn__text',
-          s.sheet.mode === 'live' ? `Live · synced ${SP.fmt.ago(s.sheet.lastSync)}`
-            : s.sheet.mode === 'error' ? 'Sync error — showing last good data'
-              : 'Snapshot mode — connect the sheet to write'),
-      )));
+        SP.el('span.conn__text', connText()))));
   }
 
   const toggleNav = () => { navOpen ? closeNav() : openNav(); };
   function openNav() {
     navOpen = true;
-    $("app").classList.add('is-nav-open');
+    $('app').classList.add('is-nav-open');
     document.getElementById('navScrim').hidden = false;
     document.querySelector('.appbar__icon--menu').setAttribute('aria-expanded', 'true');
   }
   function closeNav() {
     navOpen = false;
-    $("app").classList.remove('is-nav-open');
+    $('app').classList.remove('is-nav-open');
     document.getElementById('navScrim').hidden = true;
-    document.querySelector('.appbar__icon--menu').setAttribute('aria-expanded', 'false');
+    document.querySelector('.appbar__icon--menu')?.setAttribute('aria-expanded', 'false');
   }
 
   /* ═════════════════════════════════════════════════════════ CHROME */
+
+  function connState() {
+    if (!navigator.onLine) return 'offline';
+    const st = SP.sheets.status();
+    return st.mode === 'live' ? 'live' : st.mode === 'error' ? 'error' : st.mode === 'syncing' ? 'syncing' : 'snapshot';
+  }
+  function connText() {
+    const st = SP.sheets.status();
+    const pending = st.pending ? ` · ${st.pending} queued` : '';
+    if (!navigator.onLine) return `Offline — changes saved on this device${pending}`;
+    return { live: `Live${pending}`, syncing: 'Syncing…', error: `Error${pending}`, snapshot: `Local data${pending}` }[connState()];
+  }
 
   function paintChrome() {
     const route = SP.router.route;
     const mod = SP.router.get(route);
     const s = SP.store.state;
 
-    // Titles
     const title = mod?.title || 'StockPilot';
     const subtitle = typeof mod?.subtitle === 'function' ? mod.subtitle() : (mod?.subtitle || '');
     document.getElementById('appbarTitle').textContent = title;
     document.getElementById('appbarSub').textContent = subtitle;
     document.title = `${title} · StockPilot`;
 
-    // Nav + tab active states
     SP.$$('.navlink').forEach((n) => n.classList.toggle('is-active', n.dataset.route === route));
     SP.$$('.tab').forEach((t) => t.classList.toggle('is-active', t.dataset.tab === route));
 
-    // Badge counts
-    const sum = SP.engine.summary({ warehouse: s.prefs.warehouse });
-    const alerts = s.prefs.alerts.onlyCritical ? sum.critical : sum.critical + sum.refill;
-    const pendingPo = s.purchases.filter((p) => p.status === 'pending').length;
-
+    // Badges
+    const pendTransfers = s.transfers.filter((t) => ['requested', 'approved', 'picking', 'dispatched', 'in_transit'].includes(t.status)).length;
+    const pendApprovals = s.approvals.filter((a) => a.status === 'pending').length;
+    const unread = SP.alerts.unreadCount();
+    const counts = { transfers: pendTransfers, approvals: pendApprovals, alerts: unread };
     SP.$$('.navlink__count').forEach((n) => {
-      const r = n.dataset.role;
-      const v = r === 'refill' ? sum.critical + sum.refill
-        : r === 'purchase' ? pendingPo
-          : r === 'sales' ? 0 : 0;
+      const v = counts[n.dataset.role] || 0;
       n.textContent = v ? SP.fmt.n(v) : '';
       n.hidden = !v;
-      n.classList.toggle('navlink__count--alert', r === 'refill' && sum.critical > 0);
+      n.classList.toggle('navlink__count--alert', (n.dataset.role === 'approvals' || n.dataset.role === 'alerts') && v > 0);
     });
-
     SP.$$('.tab').forEach((t) => {
-      const r = t.dataset.tab;
       t.querySelector('.tab__dot')?.remove();
-      if (r === 'refill' && sum.critical > 0) {
-        t.appendChild(SP.el('span.tab__dot'));
-      }
+      if (t.dataset.tab === 'transfers' && pendTransfers > 0) t.appendChild(SP.el('span.tab__dot'));
     });
 
     paintConnection();
   }
 
   function paintConnection() {
-    const st = SP.sheets.status();
     const pill = document.getElementById('connPill');
     if (!pill) return;
-    const state = st.mode === 'live' ? 'live' : st.mode === 'error' ? 'error' : st.mode === 'syncing' ? 'syncing' : 'snapshot';
+    const state = connState();
     pill.dataset.state = state;
-    const pending = st.pending ? ` · ${st.pending} queued` : '';
-    pill.querySelector('.conn__text').textContent = {
-      live: `Live${pending}`,
-      syncing: 'Syncing…',
-      error: `Error${pending}`,
-      snapshot: `Snapshot${pending}`,
-    }[state];
-
+    pill.querySelector('.conn__text').textContent = connText();
     const bar = document.getElementById('syncBar');
     if (bar) bar.hidden = state !== 'syncing';
   }
 
-  /** Alert badge + notification list. */
+  /** Alert badge. */
   function refreshAlerts() {
-    const s = SP.store.state;
-    const unread = s.notifications.filter((n) => !n.read).length;
+    const unread = SP.alerts.unreadCount();
     const badge = document.getElementById('alertBadge');
     if (badge) {
       badge.textContent = SP.fmt.n(unread);
       badge.hidden = unread === 0;
     }
-
-    // Auto-generate alerts from stock state.
-    const sum = SP.engine.summary({ warehouse: s.prefs.warehouse });
-    const critical = sum.critical;
-    if (critical && s.prefs.alerts.enabled) {
-      const last = s.notifications.find((n) => n.id === `auto-critical-${critical}`);
-      if (!last && Date.now() - (s.sheet.lastSync || 0) < 864e5 * 2) {
-        SP.store.update(['notifications'], (st) => {
-          st.notifications.unshift({
-            id: `auto-critical-${critical}`,
-            at: Date.now(), read: false, tone: 'danger',
-            title: `${SP.fmt.pluralise(critical, 'SKU')} out of stock`,
-            body: 'Open Refill Radar to see what to buy first.',
-            route: 'refill',
-          });
-        });
-      }
-    }
   }
 
-  function openAlerts() {
-    const s = SP.store.state;
-    const body = SP.el('div.stacklist');
-
-    if (!s.notifications.length) {
-      body.appendChild(SP.empty({ icon: 'bell', title: 'No notifications', body: 'Alerts about low stock and order approvals land here.' }));
-    } else {
-      s.notifications.forEach((n) => {
-        body.appendChild(SP.el('button.lrow', {
-          type: 'button',
-          onclick: () => {
-            shell.close();
-            SP.store.update(['notifications'], (st) => {
-              const t = st.notifications.find((x) => x.id === n.id);
-              if (t) t.read = true;
-            });
-            if (n.route) SP.router.go(n.route);
-          },
-        },
-          SP.el('span.lrow__ico', {
-            style: {
-              background: n.read ? 'var(--surface-3)' : `var(--${n.tone === 'danger' ? 'danger' : 'info'}-soft)`,
-              color: n.read ? 'var(--text-mute)' : `var(--${n.tone === 'danger' ? 'danger' : 'info'})`,
-            },
-          }, SP.icon(n.tone === 'danger' ? 'alert' : 'info')),
-          SP.el('div.lrow__main',
-            SP.el('strong', n.title),
-            SP.el('small', n.body),
-          ),
-          SP.el('div.lrow__end', SP.el('span.tiny.mute', SP.fmt.ago(n.at))),
-        ));
-      });
-
-      body.appendChild(SP.el('button.btn.btn--ghost.btn--block', {
-        type: 'button',
-        onclick: () => {
-          SP.store.update(['notifications'], (st) => { st.notifications.forEach((n) => { n.read = true; }); });
-          refreshAlerts();
-          SP.ui.toast({ tone: 'ok', title: 'All caught up' });
-          shell.close();
-        },
-      }, 'Mark all as read'));
-    }
-
-    const shell = SP.sheet({ title: 'Notifications', content: body });
-  }
+  function openAlerts() { SP.router.go('alerts'); }
 
   function openAccount() {
     const u = SP.auth.currentUser;
-    const s = SP.store.state;
     const info = SP.auth.sessionInfo();
 
     const body = SP.el('div.stacklist',
@@ -447,28 +361,20 @@ SP.app = (() => {
           SP.el('p.tiny.mute', u.email),
           SP.el('div.row.gap-1', { style: { marginTop: '6px' } },
             SP.el('span.tag.tag--brand', SP.auth.roleDef(u.role).label),
-            SP.el('span.tag.tag--line', u.warehouse),
-          ),
-        ),
-      ),
+            SP.el('span.tag.tag--line', (u.warehouses || []).length ? u.warehouses.join(', ') : 'All warehouses')))),
       SP.el('dl.kv', { style: { marginTop: 'var(--sp-3)' } },
         SP.el('dt', 'Signed in from'), SP.el('dd', info?.device || '—'),
-        SP.el('dt', 'Session expires'), SP.el('dd', info ? SP.fmt.ago(info.expiresAt) : '—'),
-        SP.el('dt', 'Security'), SP.el('dd', SP.crypto.isPBKDF2() ? 'PBKDF2-SHA256' : 'Fallback'),
-        SP.el('dt', 'Sheets'), SP.el('dd', s.sheet.mode === 'live' ? 'Live' : 'Snapshot'),
-      ),
+        SP.el('dt', 'Session expires'), SP.el('dd', info ? SP.fmt.dateTime(info.expiresAt) : '—'),
+        SP.el('dt', 'Security'), SP.el('dd', SP.crypto.isPBKDF2() ? 'PBKDF2-SHA256' : 'Fallback digest'),
+        SP.el('dt', 'Version'), SP.el('dd', `v${SP.VERSION}`)),
     );
 
     const shell = SP.sheet({
       title: 'Account',
       content: body,
       actions: [
-        SP.el('button.btn.btn--ghost', {
-          type: 'button', onclick: () => { shell.close(); SP.router.go('settings'); },
-        }, SP.icon('cog'), 'Settings'),
-        SP.el('button.btn.btn--danger', {
-          type: 'button', onclick: () => { shell.close(); signOut(); },
-        }, SP.icon('logout'), 'Sign out'),
+        SP.el('button.btn.btn--ghost', { type: 'button', onclick: () => { shell.close(); SP.router.go('settings'); } }, SP.icon('cog'), 'Settings'),
+        SP.el('button.btn.btn--danger', { type: 'button', onclick: () => { shell.close(); signOut(); } }, SP.icon('logout'), 'Sign out'),
       ],
     });
   }
@@ -508,7 +414,6 @@ SP.app = (() => {
   function openPalette(initial = '') {
     const wrap = document.getElementById('palette');
     const input = document.getElementById('paletteInput');
-    const results = document.getElementById('paletteResults');
     wrap.hidden = false;
     input.value = initial;
     paletteIndex = 0;
@@ -527,6 +432,8 @@ SP.app = (() => {
     paletteItems = [];
 
     const q = query.trim();
+    const ql = q.toLowerCase();
+    const s = SP.store.state;
     const groups = [];
 
     /* Pages */
@@ -534,42 +441,72 @@ SP.app = (() => {
       .filter((i) => !i.perm || SP.auth.can(i.perm))
       .filter((i) => !q || SP.score(q, i.label) > 0)
       .map((i) => ({ label: i.label, sub: 'Module', icon: i.icon, run: () => SP.router.go(i.route) }));
-    if (pages.length) groups.push({ name: 'Go to', items: pages });
+    if (pages.length) groups.push({ name: 'Go to', items: pages.slice(0, 8) });
 
-    /* SKUs */
     if (q.length >= 1) {
-      const skus = SP.store.state.skus
-        .filter((s) => !s.archived)
-        .map((s) => ({ s, score: Math.max(SP.score(q, s.sku), SP.score(q, s.specs) * 0.9, SP.score(q, s.brand) * 0.6) }))
+      /* IMEI / serial */
+      const imeiClean = SP.imei.clean(q);
+      if (imeiClean.length >= 5) {
+        const devices = s.devices.filter((d) => d.imei1?.includes(imeiClean) || d.imei2?.includes(imeiClean) || d.serial?.includes(q)).slice(0, 5);
+        if (devices.length) {
+          groups.push({
+            name: 'Devices / IMEI',
+            items: devices.map((d) => {
+              const p = s.products.find((x) => x.id === d.productId);
+              return { label: d.imei1 || d.serial, sub: `${p?.name || ''} · ${SP.deviceStatus(d.status).label}`, icon: 'layers', run: () => SP.modules.devices.openDevice(d.id) };
+            }),
+          });
+        }
+      }
+
+      /* Products */
+      const products = s.products
+        .filter((p) => !p.archived)
+        .map((p) => ({ p, score: Math.max(SP.score(q, p.sku), SP.score(q, p.name) * 0.95, SP.score(q, p.brand) * 0.6, SP.score(q, p.color) * 0.5, SP.score(q, p.barcode) * 0.9) }))
         .filter((x) => x.score > 0)
         .sort((a, b) => b.score - a.score)
-        .slice(0, 7)
-        .map(({ s }) => ({
-          label: `${s.sku} · ${s.specs}`,
-          sub: `${SP.fmt.n(SP.engine.totalOf(s))} units on hand · ${s.brand} · ${s.id}`,
+        .slice(0, 6)
+        .map(({ p }) => ({
+          label: p.name,
+          sub: `${SP.fmt.n(SP.ledger.stockOf(p.id))} units · ${p.brand} · ${p.sku}`,
           icon: 'box',
-          meta: SP.engine.urgency(SP.engine.totalOf(s)).short,
-          run: () => SP.modules.inventory.openSkuSheet(s.id),
+          run: () => SP.router.go('products', { id: p.id }),
         }));
-      if (skus.length) groups.push({ name: 'Products', items: skus });
+      if (products.length) groups.push({ name: 'Products', items: products });
+
+      /* Documents */
+      const docs = [];
+      for (const t of s.transfers.filter((x) => x.ref.toLowerCase().includes(ql)).slice(0, 3)) docs.push({ label: `Transfer ${t.ref}`, sub: `${t.from} → ${t.to} · ${SP.statusOf('transfer', t.status).label}`, icon: 'swap', run: () => SP.router.go('transfers', { id: t.id }) });
+      for (const x of s.sales.filter((y) => !y.legacy && (y.ref.toLowerCase().includes(ql) || (y.customerName || '').toLowerCase().includes(ql))).slice(0, 3)) docs.push({ label: `Invoice ${x.ref}`, sub: `${x.customerName} · ${SP.fmt.money(x.total)}`, icon: 'truck', run: () => SP.router.go('sales', { id: x.id }) });
+      for (const x of s.purchases.filter((y) => !y.legacy && y.ref.toLowerCase().includes(ql)).slice(0, 3)) docs.push({ label: `PO ${x.ref}`, sub: `${x.supplierName} · ${SP.statusOf('po', x.status).label}`, icon: 'cart', run: () => SP.router.go('purchases', { id: x.id }) });
+      for (const c of s.customers.filter((y) => (y.name || '').toLowerCase().includes(ql)).slice(0, 3)) docs.push({ label: c.name, sub: `Customer · due ${SP.fmt.money(SP.sum(s.sales.filter((z) => z.customerId === c.id), (z) => Math.max(0, z.total - (z.paid || 0))))}`, icon: 'users', run: () => SP.router.go('customers') });
+      for (const w of s.warehouses.filter((y) => y.name.toLowerCase().includes(ql)).slice(0, 3)) docs.push({ label: w.name, sub: 'Warehouse', icon: 'home', run: () => SP.router.go('warehouses', { id: w.id }) });
+      if (docs.length) groups.push({ name: 'Documents & parties', items: docs.slice(0, 8) });
     }
 
     /* Actions */
     const actions = [
-      { label: 'Record a dispatch', icon: 'truck', run: () => SP.modules.sales.openForm() },
-      { label: 'New transfer', icon: 'swap', run: () => SP.modules.transfers.openForm() },
-      { label: 'New purchase order', icon: 'cart', run: () => SP.modules.purchase.createFromPlan(SP.engine.refillPlan({}).filter((r) => r.urgency.id !== 'adequate')) },
-      { label: 'Add a SKU', icon: 'plus', run: () => SP.modules.inventory.editSku(null) },
-      { label: 'Sync the Google Sheet', icon: 'refresh', run: async () => { const r = await SP.sheets.refresh(); SP.ui.toast(r.ok ? { tone: 'ok', title: 'Synced', body: `${r.count} SKUs` } : { tone: 'danger', title: 'Sync failed', body: r.error }); } },
-      { label: 'Export stock as CSV', icon: 'download', run: () => SP.modules.inventory.exportCsv() },
-      { label: 'Download a full backup', icon: 'save', run: () => SP.download(JSON.stringify(SP.store.exportBackup(), null, 2), `stockpilot-backup-${SP.fmt.date(Date.now())}.json`) },
+      { label: 'Add stock (receive)', icon: 'download', perm: 'movements:create', run: () => SP.modules.movements.receiveForm() },
+      { label: 'Create transfer', icon: 'swap', perm: 'transfers:create', run: () => SP.modules.transfers.openForm() },
+      { label: 'New sale / invoice', icon: 'truck', perm: 'sales:create', run: () => SP.modules.sales.openForm() },
+      { label: 'New purchase order', icon: 'cart', perm: 'purchases:create', run: () => SP.modules.purchases.openForm() },
+      { label: 'Find IMEI', icon: 'layers', run: () => openPalette(prompt0()) },
+      { label: 'Register device', icon: 'plus', perm: 'devices:create', run: () => SP.modules.devices.registerForm() },
+      { label: 'New product', icon: 'tag', perm: 'products:create', run: () => SP.modules.products.editProduct(null) },
+      { label: 'Start stock verification', icon: 'scale', perm: 'verify:perform', run: () => SP.router.go('verify') },
+      { label: 'Show low stock', icon: 'alert', run: () => SP.router.go('refill') },
+      { label: 'Show dead stock', icon: 'clock', run: () => SP.router.go('reports', { rpt: 'dead_stock' }) },
+      { label: 'Open pending approvals', icon: 'checkCircle', perm: 'approvals:view', run: () => SP.router.go('approvals') },
+      { label: "Generate today's report", icon: 'file', run: () => SP.router.go('reports', { rpt: 'daily_stock' }) },
+      { label: 'Export inventory CSV', icon: 'download', run: () => SP.router.go('inventory') },
+      { label: 'Download a full backup', icon: 'save', run: () => SP.download(JSON.stringify(SP.store.exportBackup(), null, 2), `stockpilot-backup-${Date.now()}.json`) },
       { label: `Switch to ${currentTheme() === 'dark' ? 'light' : 'dark'} theme`, icon: currentTheme() === 'dark' ? 'sun' : 'moon', run: () => setThemeMode(currentTheme() === 'dark' ? 'light' : 'dark') },
       { label: 'Sign out', icon: 'logout', run: () => signOut() },
     ]
+      .filter((a) => !a.perm || SP.auth.can(a.perm))
       .filter((a) => !q || SP.score(q, a.label) > 0)
       .map((a) => ({ ...a, sub: 'Action' }));
-
-    if (actions.length) groups.push({ name: 'Actions', items: actions });
+    if (actions.length) groups.push({ name: 'Actions', items: actions.slice(0, 8) });
 
     if (!groups.length) {
       results.appendChild(SP.el('div.palette__empty', `No results for “${query}”`));
@@ -580,18 +517,25 @@ SP.app = (() => {
       results.appendChild(SP.el('div.palette__group', g.name));
       for (const item of g.items) {
         paletteItems.push(item);
-        const node = SP.el('button.pal-item', {
+        results.appendChild(SP.el('button.pal-item', {
           type: 'button',
           onclick: () => { closePalette(); item.run(); },
         },
           SP.el('span.pal-item__ico', SP.icon(item.icon || 'arrowRight')),
           SP.el('div.pal-item__main', SP.el('strong', item.label), SP.el('small', item.sub)),
-          item.meta ? SP.el('span.pal-item__meta', item.meta) : null,
-        );
-        results.appendChild(node);
+          item.meta ? SP.el('span.pal-item__meta', item.meta) : null));
       }
     }
     highlight(0);
+  }
+
+  function prompt0() {
+    setTimeout(() => {
+      const input = document.getElementById('paletteInput');
+      input.value = '';
+      input.placeholder = 'Type an IMEI or serial number…';
+    }, 30);
+    return '';
   }
 
   function highlight(i) {
@@ -604,39 +548,32 @@ SP.app = (() => {
   /* ═══════════════════════════════════════════════════════ WIRING */
 
   function wireChrome() {
-    // App bar
     SP.on('[data-action="toggle-nav"]', 'click', toggleNav);
     SP.on('#navScrim', 'click', closeNav);
     SP.on('[data-action="open-search"]', 'click', () => openPalette());
     SP.on('[data-action="open-alerts"]', 'click', openAlerts);
     SP.on('[data-action="open-account"]', 'click', openAccount);
 
-    // Auth screen
     SP.on('[data-action="toggle-theme"]', 'click', () => setThemeMode(currentTheme() === 'dark' ? 'light' : 'dark'));
     SP.on('[data-action="recover"]', 'click', openRecover);
     SP.on('[data-action="sso"]', 'click', () => {
       const note = document.getElementById('ssoNote');
-      note.textContent = SP.sheets.bridgeReady()
-        ? 'Workspace directory not reachable. Ask an administrator for local credentials.'
-        : 'Connect the Apps Script bridge and deploy it to an organisation account to enable SSO.';
+      note.textContent = SP.store.state.settings.integrations.googleSheets.connected
+        ? 'Directory sign-in is not available in this deployment. Use local credentials.'
+        : 'Workspace SSO is not connected. Sign in with a local account.';
     });
     SP.on('[data-action="open-request"]', 'click', () => {
-      SP.ui.toast({
-        tone: 'info', title: 'Ask an administrator',
-        body: 'Accounts are created in Admin Console → Users by any admin.',
-        action: { label: 'Open Admin', onClick: () => SP.router.go('admin') },
-      });
+      SP.ui.toast({ tone: 'info', title: 'Ask an administrator', body: 'Accounts are created in Users & Roles by any admin.' });
     });
     SP.on('[data-action="open-help"]', 'click', () => {
-      $("auth").hidden = true;
-      $("app").hidden = false;
+      $('auth').hidden = true;
+      $('app').hidden = false;
       SP.router.registerAll(SP.modules);
       buildNav();
       SP.router.go('help');
       SP.router.start(paintChrome);
     });
 
-    // Password visibility
     SP.$$('[data-toggle-password]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const input = document.getElementById(btn.dataset.togglePassword);
@@ -649,7 +586,6 @@ SP.app = (() => {
       });
     });
 
-    // Auth tabs
     SP.$$('[data-authtab]').forEach((btn) => {
       btn.addEventListener('click', () => {
         SP.$$('[data-authtab]').forEach((b) => {
@@ -673,7 +609,6 @@ SP.app = (() => {
     const pass = document.getElementById('siPassword');
     const submit = document.getElementById('signinSubmit');
 
-    // Live strength meter on the sign-in field doubles as an awareness cue.
     const meter = document.getElementById('siStrength');
     pass.addEventListener('input', () => {
       if (!pass.value) { meter.hidden = true; return; }
@@ -693,7 +628,6 @@ SP.app = (() => {
       };
 
       err('siEmail'); err('siPassword');
-
       submit.setAttribute('aria-busy', 'true');
       SP.clear(submit);
       submit.appendChild(SP.el('span.spinner'));
@@ -723,6 +657,7 @@ SP.app = (() => {
   function wirePinPad() {
     const users = SP.store.state.users.filter((u) => u.active && u.pin);
     const host = document.getElementById('pinUsers');
+    SP.clear(host);
     if (!users.length) {
       host.appendChild(SP.el('p.tiny.mute', 'No profiles with a PIN yet. Use your password instead.'));
       return;
@@ -730,15 +665,12 @@ SP.app = (() => {
 
     let selected = null;
     let pin = '';
-
     const dots = document.getElementById('pinDots');
     const nameNode = document.getElementById('pinName');
 
     const drawDots = () => {
       SP.clear(dots);
-      for (let i = 0; i < 4; i += 1) {
-        dots.appendChild(SP.el('i', { class: i < pin.length ? 'on' : '' }));
-      }
+      for (let i = 0; i < 4; i += 1) dots.appendChild(SP.el('i', { class: i < pin.length ? 'on' : '' }));
     };
 
     const select = (u) => {
@@ -750,10 +682,7 @@ SP.app = (() => {
     };
 
     for (const u of users) {
-      const node = SP.el('button.pin-user', {
-        type: 'button', dataset: { id: u.id }, onclick: () => select(u),
-      }, SP.avatar(u), u.name.split(' ')[0]);
-      host.appendChild(node);
+      host.appendChild(SP.el('button.pin-user', { type: 'button', dataset: { id: u.id }, onclick: () => select(u) }, SP.avatar(u), u.name.split(' ')[0]));
     }
     if (users.length === 1) select(users[0]);
 
@@ -791,7 +720,6 @@ SP.app = (() => {
     const input = document.getElementById('paletteInput');
 
     input.addEventListener('input', SP.debounce((e) => renderPalette(e.target.value), 110));
-
     input.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown') { e.preventDefault(); highlight(paletteIndex + 1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); highlight(paletteIndex - 1); }
@@ -800,7 +728,6 @@ SP.app = (() => {
         SP.$$('.pal-item', document.getElementById('paletteResults'))[paletteIndex]?.click();
       } else if (e.key === 'Escape') { closePalette(); }
     });
-
     wrap.addEventListener('click', (e) => { if (e.target === wrap) closePalette(); });
   }
 
@@ -810,24 +737,22 @@ SP.app = (() => {
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        $("app").hidden ? null : openPalette();
+        if (!$('app').hidden) openPalette();
         return;
       }
-      if (e.key === 'Escape' && !document.getElementById('palette').hidden) {
-        closePalette();
-        return;
-      }
+      if (e.key === 'Escape' && !document.getElementById('palette').hidden) { closePalette(); return; }
       if (typing) return;
 
-      // Single-key navigation on desktop.
-      if (!$("app").hidden && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const map = { d: 'dashboard', i: 'inventory', r: 'refill', w: 'warehouses', s: 'sales', t: 'transfers', p: 'purchase', n: 'insights' };
+      if (!$('app').hidden && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const map = { d: 'dashboard', i: 'inventory', t: 'transfers', m: 'movements', s: 'sales', w: 'warehouses', p: 'products' };
         const route = map[e.key.toLowerCase()];
-        if (route && SP.router.get(route)) { SP.router.go(route); return; }
+        const navItem = SP.NAV.flatMap((g) => g.items).find((i) => i.route === route);
+        if (route && SP.router.get(route) && (!navItem?.perm || SP.auth.can(navItem.perm))) {
+          SP.router.go(route);
+        }
       }
     });
 
-    // System theme changes.
     matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
       if ((localStorage.getItem('stockpilot.themeMode') || 'auto') === 'auto') applyTheme();
     });
@@ -839,14 +764,14 @@ SP.app = (() => {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
       refreshAlerts();
-      if (SP.router.route) SP.router.refresh();
+      paintConnection();
     });
   }
 
   /* ═══════════════════════════════════════════════════ RECOVERY */
 
   async function openRecover() {
-    const res = await SP.modal({
+    await SP.modal({
       title: 'Reset your password',
       subtitle: 'Use the recovery answer you set on this device.',
       icon: 'key',
@@ -865,7 +790,6 @@ SP.app = (() => {
         });
       },
     });
-    void res;
   }
 
   /* ══════════════════════════════════════════════════════════════ */
@@ -878,10 +802,8 @@ SP.app = (() => {
 
 /* ═══════════════════════════════════════════════════ OFFLINE SUPPORT */
 
-/** Register the service worker that makes the app usable with no network. */
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
-  // A file:// origin and the Apps Script sandbox cannot host a worker.
   if (location.protocol === 'file:') return;
   addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch((e) => {

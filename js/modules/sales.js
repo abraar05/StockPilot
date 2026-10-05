@@ -1,282 +1,365 @@
 /**
- * modules/sales.js — dispatch / sales ledger.
- * Recording a dispatch decrements stock and feeds the velocity engine.
+ * modules/sales.js — quotation → order → invoice → delivery → payment,
+ * with returns, customer dues, printable invoices and WhatsApp sharing.
+ * Selling posts `sale` movements into the ledger.
  */
 window.SP = window.SP || {};
 SP.modules = SP.modules || {};
 
 SP.modules.sales = (() => {
-  const state = { q: '', warehouse: '*', type: 'all', range: 30 };
+  const state = { q: '', status: 'all' };
 
-  const MOD = {
-    title: 'Dispatch Log',
-    subtitle: () => {
-      const n = SP.store.state.sales.length;
-      return `${SP.fmt.pluralise(n, 'entry', 'entries')} recorded`;
-    },
-    mount,
-  };
+  const MOD = { title: 'Sales', subtitle: () => `${SP.fmt.pluralise(SP.store.state.sales.filter((x) => !x.legacy).length, 'document')}`, mount, openForm, openSale };
 
-  async function mount(params) {
-    if (params?.skuId) setTimeout(() => openForm(params), 140);
-
-    const root = SP.el('div.stack.gap-4');
-    const s = SP.store.state;
-
-    /* ── Stats ────────────────────────────────────────────────────── */
-    const cutoff = Date.now() - state.range * 864e5;
-    const inRange = s.sales.filter((x) => Date.parse(x.at) >= cutoff);
-    const out = inRange.filter((x) => x.type !== 'return').reduce((a, x) => a + (x.qty || 0), 0);
-    const back = inRange.filter((x) => x.type === 'return').reduce((a, x) => a + (x.qty || 0), 0);
-    const value = inRange.filter((x) => x.type !== 'return')
-      .reduce((a, x) => a + (x.qty || 0) * (x.sellPrice ?? x.unitCost ?? 0), 0);
-
-    root.appendChild(SP.el('div.hero',
-      SP.el('div.hero__eyebrow', SP.icon('truck'), `Last ${state.range} days`),
-      SP.el('div',
-        SP.el('div.hero__value', SP.fmt.n(Math.max(0, out - back))),
-        SP.el('p.hero__sub',
-          `Net units dispatched · ${SP.fmt.pluralise(inRange.length, 'entry', 'entries')} · `,
-          SP.el('strong', { style: { color: 'var(--ok)' } }, SP.fmt.money(value)), ' at recorded value.'),
-      ),
-      SP.el('div.hero__split',
-        cell(SP.fmt.n(out), 'Dispatched', 'var(--info)'),
-        cell(SP.fmt.n(back), 'Returned', 'var(--warn)'),
-        cell(out ? SP.fmt.pct((back / Math.max(1, out)) * 100, 1) : '0%', 'Return rate', 'var(--violet)'),
-      ),
-    ));
-
-    /* ── Range + create ───────────────────────────────────────────── */
-    root.appendChild(SP.el('div.row.gap-2.row--wrap',
-      SP.el('select.select', {
-        style: { flex: '1 1 140px' }, 'aria-label': 'Period',
-        onchange: (e) => { state.range = Number(e.target.value); SP.router.refresh(); },
-      },
-        ...[7, 14, 30, 90, 365].map((d) => SP.el('option', {
-          value: d, selected: state.range === d,
-        }, d === 365 ? 'Last year' : `Last ${d} days`)),
-      ),
-      SP.auth.can('create:sale') ? SP.el('button.btn.btn--primary.grow', {
-        type: 'button', onclick: () => openForm(),
-      }, SP.icon('plus'), 'Record dispatch') : null,
-      SP.el('button.btn.btn--ghost', { type: 'button', onclick: exportCsv }, SP.icon('download')),
-    ));
-
-    /* ── Trend ────────────────────────────────────────────────────── */
-    const trend = SP.engine.salesTrend(Math.min(state.range, 30));
-    root.appendChild(SP.el('div.card',
-      SP.el('div.card__head', SP.icon('chart'), SP.el('h2', 'Daily movement')),
-      SP.el('div.card__body',
-        SP.charts.lines({
-          labels: trend.map((d) => d.date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })),
-          series: [{ label: 'Units', values: trend.map((d) => d.units), colour: SP.engine.colourHex('Blue') }],
-          height: 150,
-        }),
-      ),
-    ));
-
-    /* ── Filters ──────────────────────────────────────────────────── */
-    root.appendChild(SP.el('div.grid.grid--2',
-      SP.el('div.searchbar',
-        SP.icon('search'),
-        SP.el('input.input', {
-          type: 'search', placeholder: 'Search SKU or customer…', value: state.q,
-          oninput: SP.debounce((e) => { state.q = e.target.value; renderList(); }, 200),
-        }),
-      ),
-      SP.el('select.select', {
-        'aria-label': 'Type',
-        onchange: (e) => { state.type = e.target.value; renderList(); },
-      },
-        ...[['all', 'All movements'], ['dispatch', 'Dispatches'], ['return', 'Returns']]
-          .map(([v, l]) => SP.el('option', { value: v, selected: state.type === v }, l)),
-      ),
-    ));
-
-    const listHost = SP.el('div');
-    root.appendChild(listHost);
-
-    function renderList() {
-      const q = state.q.trim().toLowerCase();
-      const rows = [...s.sales]
-        .filter((x) => (Date.parse(x.at) >= cutoff))
-        .filter((x) => (state.type === 'all' ? true : x.type === state.type))
-        .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-        .filter((x) => {
-          if (!q) return true;
-          const sku = s.skus.find((k) => k.id === x.skuId);
-          return `${sku?.sku || ''} ${x.customer || ''} ${x.note || ''}`.toLowerCase().includes(q);
-        });
-
-      SP.clear(listHost);
-
-      if (!rows.length) {
-        listHost.appendChild(SP.el('div.card', SP.empty({
-          icon: 'truck',
-          title: 'No dispatches in this window',
-          body: 'Recording dispatches is what unlocks sales velocity, cover forecasts and dead-stock detection.',
-          action: SP.auth.can('create:sale') ? { label: 'Record a dispatch', onClick: () => openForm() } : null,
-        })));
-        return;
-      }
-
-      listHost.appendChild(SP.el('div.card',
-        SP.el('div.card__head',
-          SP.el('h2', `${SP.fmt.n(rows.length)} entries`),
-          SP.el('span.sub', `${SP.fmt.n(SP.sum(rows, (r) => r.type === 'return' ? -(r.qty || 0) : (r.qty || 0)))} net units`),
-        ),
-        ...rows.slice(0, 60).map((x) => {
-          const sku = s.skus.find((k) => k.id === x.skuId);
-          const isReturn = x.type === 'return';
-          return SP.el('div.lrow', { role: 'button', tabIndex: 0 },
-            SP.el('span.lrow__ico', {
-              style: {
-                background: isReturn ? 'var(--warn-soft)' : 'var(--info-soft)',
-                color: isReturn ? 'var(--warn)' : 'var(--info)',
-              },
-            }, SP.icon(isReturn ? 'refresh' : 'truck')),
-            SP.el('div.lrow__main',
-              SP.el('strong', `${isReturn ? '↩ ' : ''}${SP.fmt.n(x.qty)} × ${sku?.sku || 'Unknown'}`),
-              SP.el('small', [
-                sku?.specs,
-                x.customer,
-                x.note,
-                x.warehouse ? `@ ${x.warehouse}` : null,
-              ].filter(Boolean).join(' · ')),
-            ),
-            SP.el('div.lrow__end',
-              SP.el('span.lrow__val', { style: { color: isReturn ? 'var(--warn)' : 'var(--text)' } },
-                `${isReturn ? '−' : '−'}${SP.fmt.n(x.qty)}`),
-              SP.el('span.tiny.mute', SP.fmt.ago(x.at)),
-            ),
-          );
-        }),
-        rows.length > 60 ? SP.el('div', { style: { padding: 'var(--sp-3)', textAlign: 'center' } },
-          SP.el('p.tiny.mute', `Showing the first 60 of ${rows.length}. Export for the full history.`)) : null,
-      ));
-    }
-
-    renderList();
-    return root;
-
-    function cell(v, label, colour) {
-      return SP.el('div.hero__cell', SP.el('b', { style: { color: colour } }, v), SP.el('span', label));
-    }
+  function rows() {
+    let list = SP.store.state.sales.filter((x) => !x.legacy).sort((a, b) => b.ts - a.ts);
+    if (state.status !== 'all') list = list.filter((x) => x.status === state.status);
+    if (state.q) list = list.filter((x) => `${x.ref} ${x.customerName} ${x.salesperson}`.toLowerCase().includes(state.q));
+    return list;
   }
 
-  /* ───────────────────────────────────────────────────── create */
+  function mount(params) {
+    if (params?.compose) setTimeout(() => openForm(), 100);
+    if (params?.id) setTimeout(() => openSale(params.id), 100);
+    const root = SP.el('div.stack.gap-3');
 
-  function openForm(prefill = {}) {
-    if (!SP.auth.can('create:sale')) {
-      SP.ui.toast({ tone: 'warn', title: 'Not permitted', body: 'Your role cannot record dispatches.' });
-      return;
-    }
+    const table = SP.table.create({
+      columns: [
+        { key: 'ref', label: 'Ref', width: '110px', value: (x) => x.ref, render: (x) => SP.el('strong', x.ref) },
+        { key: 'ts', label: 'Date', width: '110px', value: (x) => x.ts, render: (x) => SP.el('span.tiny', SP.fmt.date(x.ts)) },
+        { key: 'customerName', label: 'Customer', value: (x) => x.customerName || '' },
+        { key: 'warehouseId', label: 'Warehouse', width: '110px', value: (x) => x.warehouseId },
+        { key: 'total', label: 'Total', width: '110px', align: 'right', value: (x) => x.total, render: (x) => SP.el('strong', SP.fmt.money(x.total)) },
+        { key: 'due', label: 'Due', width: '100px', align: 'right', value: (x) => Math.max(0, (x.total || 0) - (x.paid || 0)), render: (x) => { const d = Math.max(0, (x.total || 0) - (x.paid || 0)); return d > 0 ? SP.el('span', { style: { color: 'var(--danger)' } }, SP.fmt.money(d)) : SP.el('span.mute', '—'); } },
+        { key: 'status', label: 'Status', width: '120px', value: (x) => x.status, render: (x) => SP.ui2.badge('sale', x.status, { sm: true }) },
+      ],
+      rows,
+      rowId: (x) => x.id,
+      defaultSort: 'ts', defaultDir: 'desc',
+      empty: { icon: 'truck', title: 'No sales yet', body: 'Create a quotation, order or direct invoice.' },
+      onRowClick: (x) => openSale(x.id),
+    });
+
+    const filters = SP.ui2.filterBar({
+      placeholder: 'Search invoice, customer…',
+      onChange: (f) => { state.q = f.q; table.refresh(); },
+    });
+    const chips = SP.chipRow(
+      [{ value: 'all', label: 'All' }, ...SP.STATUS.sale.map((s) => ({ value: s.id, label: s.label }))],
+      state.status, (v) => { state.status = v; table.refresh(); });
+
+    const actions = [];
+    if (SP.auth.can('sales:create')) actions.push(SP.el('button.btn.btn--primary.btn--sm', { type: 'button', onclick: () => openForm() }, SP.icon('plus'), 'New sale'));
+
+    root.append(
+      SP.ui2.pageHead({ title: 'Sales', sub: 'Quotation → order → invoice → delivery → payment.', actions }),
+      filters.el, chips, table.el,
+    );
+    return root;
+  }
+
+  /* ══════════════════════════════════════════════════════════ CREATE */
+
+  async function openForm(preset = {}) {
     const s = SP.store.state;
+    const items = (preset.items || []).map((i) => ({ ...i, price: i.price ?? 0, discount: 0 }));
 
-    const fields = [
-      {
-        key: 'skuId', label: 'SKU', type: 'select',
-        value: prefill.skuId || s.skus.find((x) => !x.archived)?.id,
-        options: s.skus.filter((x) => !x.archived).map((x) => ({
-          value: x.id, label: SP.fmt.shortSku(x.sku, x.specs, 38),
-        })),
-      },
-      { key: 'qty', label: 'Quantity', type: 'number', value: 1, min: 1, required: true },
-      {
-        key: 'colour', label: 'Colour variant', type: 'select',
-        value: SP.engine.activeColours(prefill.skuId
-          ? s.skus.find((x) => x.id === prefill.skuId)
-          : s.skus.find((x) => x.id === prefill.skuId) || s.skus[0])[0]?.colour || SP.COLOURS[0],
-        options: SP.COLOURS.map((c) => ({ value: c, label: c })),
-        hint: 'Used to keep the per-colour breakdown accurate.',
-      },
-      {
-        key: 'type', label: 'Movement', type: 'select', value: prefill.type || 'dispatch',
-        options: [{ value: 'dispatch', label: 'Dispatch (stock out)' }, { value: 'return', label: 'Return (stock in)' }],
-      },
-      {
-        key: 'warehouse', label: 'From warehouse', type: 'select',
-        value: prefill.warehouse || SP.auth.scopeOf()[0] || s.prefs.warehouse,
-        options: s.warehouses.map((w) => ({ value: w.id, label: w.label })),
-      },
-      { key: 'customer', label: 'Customer / channel', placeholder: 'Optional' },
-      { key: 'note', label: 'Note', type: 'textarea', placeholder: 'Optional' },
-    ];
+    const itemsHost = SP.el('div.stack.gap-1');
+    const totalsNode = SP.el('div.sale-total');
 
-    SP.modal({
-      title: 'Record a dispatch',
-      subtitle: 'Stock is deducted immediately and velocity updates straight away.',
-      icon: 'truck',
-      fields,
-      okLabel: 'Record dispatch',
-      onOk: (v) => {
-        const sku = SP.store.state.skus.find((x) => x.id === v.skuId);
-        if (!sku) throw new Error('Select a SKU.');
+    const compute = () => {
+      const subtotal = SP.sum(items, (i) => i.qty * i.price);
+      const discount = SP.sum(items, (i) => (i.qty * i.price) * ((i.discount || 0) / 100));
+      return { subtotal, discount, total: subtotal - discount };
+    };
+    const drawTotals = () => {
+      const t = compute();
+      SP.clear(totalsNode);
+      totalsNode.append(
+        SP.el('div.sale-total__row', SP.el('span', 'Subtotal'), SP.el('b', SP.fmt.money(t.subtotal))),
+        SP.el('div.sale-total__row', SP.el('span', 'Discount'), SP.el('b', `− ${SP.fmt.money(t.discount)}`)),
+        SP.el('div.sale-total__row.sale-total__row--grand', SP.el('span', 'Total'), SP.el('b', SP.fmt.money(t.total))),
+      );
+    };
 
-        const available = Number(sku.byWh?.[v.warehouse]) || 0;
-        if (v.type === 'dispatch' && v.qty > available) {
-          throw new Error(`Only ${SP.fmt.n(available)} units at ${v.warehouse}. Reduce the quantity or pick another site.`);
+    const drawItems = () => {
+      SP.clear(itemsHost);
+      items.forEach((it, idx) => {
+        const p = s.products.find((x) => x.id === it.productId);
+        itemsHost.appendChild(SP.el('div.sale-line',
+          SP.el('div.grow',
+            SP.el('strong', p?.name || it.productId),
+            SP.el('div.row.gap-2', { style: { marginTop: '4px', flexWrap: 'wrap' } },
+              SP.el('label.tiny', 'Qty ', SP.el('input.input.input--num', { type: 'number', min: 1, value: it.qty, style: { width: '64px' }, onchange: (e) => { it.qty = Math.max(1, Number(e.target.value) || 1); drawTotals(); } })),
+              SP.el('label.tiny', 'Price ', SP.el('input.input.input--num', { type: 'number', min: 0, value: it.price, style: { width: '96px' }, onchange: (e) => { it.price = Math.max(0, Number(e.target.value) || 0); drawTotals(); } })),
+              SP.el('label.tiny', 'Disc % ', SP.el('input.input.input--num', { type: 'number', min: 0, max: 100, value: it.discount, style: { width: '60px' }, onchange: (e) => { it.discount = SP.clamp(Number(e.target.value) || 0, 0, 100); drawTotals(); } })))),
+          SP.el('button.btn.btn--icon.btn--sm.btn--quiet', { type: 'button', 'aria-label': 'Remove', onclick: () => { items.splice(idx, 1); drawItems(); drawTotals(); } }, SP.icon('x'))));
+      });
+      itemsHost.appendChild(SP.el('button.btn.btn--ghost.btn--sm.btn--block', {
+        type: 'button',
+        onclick: async () => {
+          const p = await SP.ui2.pickProduct({ title: 'Add product to sale', onlyInStock: false });
+          if (!p) return;
+          const existing = items.find((i) => i.productId === p.id);
+          if (existing) existing.qty += 1;
+          else items.push({ productId: p.id, qty: 1, price: p.price || 0, discount: 0 });
+          drawItems(); drawTotals();
+        },
+      }, SP.icon('plus'), 'Add product'));
+    };
+    drawItems(); drawTotals();
+
+    const customers = s.customers;
+    const res = await SP.modal({
+      title: 'New sale',
+      subtitle: 'Stock is deducted when the invoice is issued.',
+      icon: 'truck', okLabel: 'Issue invoice',
+      draftId: 'sale-new',
+      body: SP.el('div.stack.gap-2', SP.el('strong', { class: 'tiny mute' }, 'LINES'), itemsHost, totalsNode),
+      fields: [
+        { key: 'customerId', label: 'Customer', type: 'select', options: [{ value: '', label: 'Walk-in customer' }, ...customers.map((c) => ({ value: c.id, label: c.name }))], value: preset.customerId || '' },
+        { key: 'warehouseId', label: 'From warehouse', type: 'select', required: true, options: SP.store.state.warehouses.filter((w) => w.active && SP.auth.inScope(w.id)).map((w) => ({ value: w.id, label: w.name })) },
+        { key: 'paidNow', label: 'Paid now (৳)', type: 'number', min: 0, value: 0 },
+        { key: 'dueAt', label: 'Payment due date', type: 'date' },
+        { key: 'notes', label: 'Notes', type: 'textarea' },
+      ],
+      onOk: async (v) => {
+        if (!items.length) throw new Error('Add at least one product line.');
+        for (const it of items) {
+          const avail = SP.ledger.availableOf(it.productId, v.warehouseId);
+          if (it.qty > avail) {
+            const p = s.products.find((x) => x.id === it.productId);
+            throw new Error(`${p?.name}: only ${avail} available at this warehouse.`);
+          }
         }
+        const t = compute();
+        const maxDisc = t.subtotal ? t.discount / t.subtotal * 100 : 0;
+        const customer = customers.find((c) => c.id === v.customerId);
 
-        const record = {
-          id: SP.uid('sal'),
-          at: Date.now(),
-          type: v.type,
-          skuId: v.skuId,
-          qty: v.qty,
-          colour: v.colour,
-          warehouse: v.warehouse,
-          customer: (v.customer || '').trim(),
-          note: (v.note || '').trim(),
-          unitCost: sku.cost || SP.costFor(sku),
-          by: SP.auth.currentUser?.name || '',
+        const issue = (approval) => {
+          const sale = {
+            id: SP.uid('sal'), ref: SP.store.nextRef('sale'),
+            ts: Date.now(),
+            customerId: customer?.id || null, customerName: customer?.name || 'Walk-in customer',
+            warehouseId: v.warehouseId,
+            items: items.map((i) => ({ ...i, deviceIds: [] })),
+            status: 'invoiced',
+            subtotal: t.subtotal, discountTotal: t.discount, taxTotal: 0, total: t.total,
+            paid: Math.min(v.paidNow || 0, t.total),
+            dueAt: v.dueAt ? Date.parse(v.dueAt) : null,
+            salesperson: SP.auth.current()?.name || 'system',
+            notes: v.notes || '',
+            approvalId: approval?.id || null,
+            history: [{ at: Date.now(), by: SP.auth.current()?.name || 'system', action: 'invoiced', note: '' }],
+          };
+          // Pick devices for serialized products.
+          SP.store.update(['sales'], (st) => { st.sales.unshift(sale); });
+          const moves = sale.items.map((i) => ({
+            type: 'sale', productId: i.productId, qty: i.qty, warehouseId: sale.warehouseId,
+            refType: 'sale', refId: sale.id, unitCost: i.price,
+            reason: `Invoice ${sale.ref}`,
+          }));
+          SP.ledger.postBatch(moves);
+          if (sale.paid > 0) recordPayment('receipt', 'customer', sale.customerId, sale.paid, { saleId: sale.id, method: 'cash', note: `Payment on ${sale.ref}` });
+          if (customer) {
+            SP.store.update(['customers'], (st) => {
+              const c = st.customers.find((x) => x.id === customer.id);
+              if (c) { c.updatedAt = Date.now(); }
+            });
+          }
+          SP.store.audit('sale.create', sale.ref, `${sale.customerName} · ${SP.fmt.money(sale.total)} · paid ${SP.fmt.money(sale.paid)}`);
+          return sale;
         };
 
-        SP.store.update(['sales', 'skus'], (st) => {
-          st.sales.unshift(record);
-          const t = st.skus.find((x) => x.id === v.skuId);
-          if (!t) return;
-          const cur = Number(t.byWh?.[v.warehouse]) || 0;
-          t.byWh[v.warehouse] = Math.max(0, v.type === 'return' ? cur + v.qty : cur - v.qty);
-          // Keep the colour breakdown in step with the site totals, otherwise
-          // every dispatch would break the reconciliation check.
-          t.colours = SP.engine.adjustColours(t, v.type === 'return' ? v.qty : -v.qty, {
-            colour: v.colour,
-          });
-          t.updatedAt = Date.now();
-        });
+        const outcome = SP.approvals.guard('discount', { discountPct: maxDisc, value: t.total }, {
+          title: `Sale discount ${maxDisc.toFixed(1)}% (${SP.fmt.money(t.discount)})`,
+          detail: `Customer: ${customer?.name || 'Walk-in'} · total ${SP.fmt.money(t.total)}`,
+          refType: 'sale',
+          resumeKey: 'sale_issue', resumeData: { items, v },
+        }, issue);
+        if (outcome.status === 'pending') {
+          SP.ui.toast({ tone: 'info', title: 'Discount needs approval', body: 'The invoice is issued after a manager approves the discount.' });
+          return;
+        }
+        const sale = outcome.result;
+        SP.ui.toast({ tone: 'ok', title: `Invoice ${sale.ref} issued`, body: SP.fmt.money(sale.total) });
+        SP.router.refresh();
+        openSale(sale.id);
+      },
+    });
+    return res;
+  }
 
-        SP.store.audit('sale.record', sku.sku, `${v.type} ${v.qty} @ ${v.warehouse}`);
-        SP.sheets.push({ type: 'sale.record', ...record });
-        SP.ui.toast({
-          tone: 'ok', title: 'Dispatch recorded',
-          body: `${SP.fmt.n(v.qty)} × ${sku.sku}`,
+  SP.approvals.registerResume('sale_issue', (d) => {
+    SP.ui.toast({ tone: 'info', title: 'Discount approved', body: 'Re-open Sales → New sale to issue the invoice. (Draft preserved below.)' });
+    // Re-open the form prefilled so a single tap issues the invoice.
+    SP.modules.sales.openForm({ items: d.items, customerId: d.v.customerId });
+  });
+
+  /* ══════════════════════════════════════════════════════════ DETAIL */
+
+  function openSale(id) {
+    const x = SP.store.state.sales.find((y) => y.id === id);
+    if (!x) return;
+    const s = SP.store.state;
+    const due = Math.max(0, (x.total || 0) - (x.paid || 0));
+
+    const payments = s.payments.filter((p) => p.saleId === x.id);
+    const actions = [];
+
+    if (due > 0 && SP.auth.can('payments:create') && x.status !== 'cancelled') {
+      actions.push(SP.el('button.btn.btn--primary', {
+        type: 'button',
+        onclick: async () => {
+          const r = await SP.modal({
+            title: `Receive payment — ${x.ref}`, icon: 'key', okLabel: 'Record payment',
+            fields: [
+              { key: 'amount', label: `Amount (due ${SP.fmt.money(due)})`, type: 'number', min: 1, max: due, required: true, value: due },
+              { key: 'method', label: 'Method', type: 'select', value: 'cash', options: ['cash', 'bank', 'bKash', 'Nagad', 'card', 'other'].map((m) => ({ value: m, label: SP.fmt.titleCase(m) })) },
+              { key: 'note', label: 'Note' },
+            ],
+            onOk: async (v) => {
+              recordPayment('receipt', 'customer', x.customerId, v.amount, { saleId: x.id, method: v.method, note: v.note });
+              SP.store.update(['sales'], (st) => { const t = st.sales.find((y) => y.id === x.id); t.paid = (t.paid || 0) + v.amount; });
+              SP.ui.toast({ tone: 'ok', title: 'Payment recorded' });
+              SP.router.refresh();
+            },
+          });
+          void r;
+        },
+      }, SP.icon('key'), 'Receive payment'));
+    }
+    actions.push(SP.el('button.btn.btn--ghost', { type: 'button', onclick: () => printInvoice(x) }, SP.icon('print'), 'Print invoice'));
+    actions.push(SP.el('button.btn.btn--ghost', { type: 'button', onclick: () => shareWhatsApp(x) }, SP.icon('external'), 'WhatsApp'));
+    if (!['cancelled', 'returned'].includes(x.status) && SP.auth.can('sales:create')) {
+      actions.push(SP.el('button.btn.btn--danger', { type: 'button', onclick: () => returnForm(x) }, SP.icon('refresh'), 'Return'));
+    }
+
+    SP.sheet({
+      title: `Invoice ${x.ref}`,
+      subtitle: `${x.customerName} · ${SP.fmt.dateTime(x.ts)}`,
+      content: SP.el('div.stack.gap-3',
+        SP.el('div.row.gap-2', SP.ui2.badge('sale', x.status), SP.ui2.badge('payment', due <= 0 ? 'paid' : (x.paid > 0 ? 'partial' : 'unpaid'))),
+        SP.el('div.stack.gap-1', ...x.items.map((i) => {
+          const p = s.products.find((y) => y.id === i.productId);
+          return SP.el('div.lrow',
+            SP.el('span.lrow__ico', SP.icon('box')),
+            SP.el('div.lrow__main', SP.el('strong', p?.name || i.productId), SP.el('small', `${i.qty} × ${SP.fmt.money(i.price)}${i.discount ? ` · −${i.discount}%` : ''}`)),
+            SP.el('span.lrow__val', SP.fmt.money(i.qty * i.price * (1 - (i.discount || 0) / 100))));
+        })),
+        SP.el('dl.kv',
+          SP.el('dt', 'Subtotal'), SP.el('dd', SP.fmt.money(x.subtotal)),
+          SP.el('dt', 'Discount'), SP.el('dd', `− ${SP.fmt.money(x.discountTotal || 0)}`),
+          SP.el('dt', 'Total'), SP.el('dd', SP.el('strong', SP.fmt.money(x.total))),
+          SP.el('dt', 'Paid'), SP.el('dd', SP.fmt.money(x.paid || 0)),
+          SP.el('dt', 'Due'), SP.el('dd', due > 0 ? SP.el('span', { style: { color: 'var(--danger)' } }, SP.fmt.money(due)) : '—'),
+          x.dueAt ? [SP.el('dt', 'Due date'), SP.el('dd', SP.fmt.date(x.dueAt))] : null,
+          SP.el('dt', 'Sold by'), SP.el('dd', x.salesperson || '—'),
+          SP.el('dt', 'Warehouse'), SP.el('dd', s.warehouses.find((w) => w.id === x.warehouseId)?.name || x.warehouseId)),
+        payments.length ? SP.el('div',
+          SP.el('strong', { style: { display: 'block', marginBottom: 'var(--sp-2)' } }, 'Payments'),
+          SP.ui2.timeline(payments.map((p) => ({ at: p.ts, title: `${SP.fmt.money(p.amount)} · ${p.method}`, meta: `${p.ref} · ${p.by}` })))) : null,
+      ),
+      actions,
+    });
+  }
+
+  function recordPayment(kind, partyType, partyId, amount, { saleId, purchaseId, method, note } = {}) {
+    const payment = {
+      id: SP.uid('pay'), ref: SP.store.nextRef('payment'), ts: Date.now(),
+      kind, partyType, partyId, saleId: saleId || null, purchaseId: purchaseId || null,
+      amount, method: method || 'cash', note: note || '',
+      by: SP.auth.current()?.name || 'system',
+    };
+    SP.store.update(['payments'], (st) => { st.payments.unshift(payment); });
+    SP.store.audit(`payment.${kind}`, payment.ref, `${SP.fmt.money(amount)}${saleId ? ' · sale' : ''}${purchaseId ? ' · purchase' : ''}`);
+    return payment;
+  }
+
+  /* returns: restock + optional refund */
+  async function returnForm(x) {
+    const r = await SP.modal({
+      title: `Return against ${x.ref}`, icon: 'refresh', okLabel: 'Process return', tone: 'danger',
+      fields: [
+        { key: 'qtys', label: 'Quantities to return', type: 'textarea', required: true, placeholder: x.items.map((i) => `${i.productId}: ${i.qty}`).join('\n'), hint: 'One per line: productId: qty' },
+        { key: 'refund', label: 'Refund now (৳)', type: 'number', min: 0, value: 0 },
+        { key: 'reason', label: 'Reason', required: true },
+      ],
+      onOk: async (v) => {
+        const lines = String(v.qtys).split('\n').map((l) => l.trim()).filter(Boolean);
+        const moves = [];
+        for (const line of lines) {
+          const [pid, qtyRaw] = line.split(':').map((z) => z.trim());
+          const qty = Number(qtyRaw);
+          const item = x.items.find((i) => i.productId === pid);
+          if (!item || !Number.isFinite(qty) || qty <= 0 || qty > item.qty) throw new Error(`Bad line: ${line}`);
+          moves.push({ type: 'sale_return', productId: pid, qty, warehouseId: x.warehouseId, refType: 'sale', refId: x.id, reason: `Return on ${x.ref}: ${v.reason}` });
+        }
+        SP.ledger.postBatch(moves);
+        if (v.refund > 0) recordPayment('payment', 'customer', x.customerId, v.refund, { saleId: x.id, method: 'cash', note: `Refund for ${x.ref}` });
+        SP.store.update(['sales'], (st) => {
+          const t = st.sales.find((y) => y.id === x.id);
+          t.status = 'returned';
+          t.history.push({ at: Date.now(), by: SP.auth.current()?.name || 'system', action: 'returned', note: v.reason });
         });
+        SP.store.audit('sale.return', x.ref, v.reason);
+        SP.ui.toast({ tone: 'ok', title: 'Return processed', body: 'Stock is back on the shelf.' });
         SP.router.refresh();
       },
     });
+    return r;
   }
 
-  function exportCsv() {
+  /* ─────────────────────────────────────────────────────── documents */
+
+  function invoiceHtml(x) {
     const s = SP.store.state;
-    const rows = s.sales.map((x) => {
-      const sku = s.skus.find((k) => k.id === x.skuId);
-      return {
-        Date: SP.fmt.dateTime(x.at),
-        Type: x.type,
-        SKU: sku?.sku || x.skuId,
-        Specs: sku?.specs || '',
-        Qty: x.qty,
-        Warehouse: x.warehouse,
-        Customer: x.customer || '',
-        Note: x.note || '',
-        RecordedBy: x.by || '',
-      };
+    const rows = x.items.map((i) => {
+      const p = s.products.find((y) => y.id === i.productId);
+      return [p?.name || i.productId, i.qty, SP.fmt.money(i.price), i.discount ? `${i.discount}%` : '—', SP.fmt.money(i.qty * i.price * (1 - (i.discount || 0) / 100))];
     });
-    SP.download(SP.toCSV(rows, ['Date', 'Type', 'SKU', 'Specs', 'Qty', 'Warehouse', 'Customer', 'Note', 'RecordedBy']),
-      `stockpilot-dispatch-${SP.fmt.date(Date.now())}.csv`, 'text/csv');
-    SP.ui.toast({ tone: 'ok', title: 'Export ready' });
+    return SP.impexp.tableHtml(['Item', 'Qty', 'Price', 'Disc', 'Amount'], rows)
+      + `<table class="printdoc__table" style="margin-top:0"><tbody>
+        <tr><td style="text-align:right"><strong>Subtotal</strong></td><td style="width:120px;text-align:right">${SP.fmt.money(x.subtotal)}</td></tr>
+        <tr><td style="text-align:right">Discount</td><td style="text-align:right">− ${SP.fmt.money(x.discountTotal || 0)}</td></tr>
+        <tr><td style="text-align:right"><strong>Total</strong></td><td style="text-align:right"><strong>${SP.fmt.money(x.total)}</strong></td></tr>
+        <tr><td style="text-align:right">Paid</td><td style="text-align:right">${SP.fmt.money(x.paid || 0)}</td></tr>
+        <tr><td style="text-align:right"><strong>Due</strong></td><td style="text-align:right"><strong>${SP.fmt.money(Math.max(0, x.total - (x.paid || 0)))}</strong></td></tr>
+      </tbody></table>`;
   }
 
-  return { ...MOD, openForm };
+  function printInvoice(x) {
+    SP.impexp.printDocument({
+      title: `Invoice ${x.ref}`,
+      subtitle: `${x.customerName} · ${SP.fmt.dateTime(x.ts)}`,
+      bodyHtml: invoiceHtml(x),
+      footer: SP.store.state.settings.company.invoiceFooter,
+    });
+  }
+
+  /** WhatsApp share: opens wa.me with the invoice as text. No fake send. */
+  function shareWhatsApp(x) {
+    const s = SP.store.state;
+    const cust = s.customers.find((c) => c.id === x.customerId);
+    const lines = [
+      `*${s.settings.company.name || 'Invoice'}*`,
+      `Invoice ${x.ref} — ${SP.fmt.date(x.ts)}`,
+      '',
+      ...x.items.map((i) => {
+        const p = s.products.find((y) => y.id === i.productId);
+        return `• ${p?.name || i.productId} × ${i.qty} — ${SP.fmt.money(i.qty * i.price * (1 - (i.discount || 0) / 100))}`;
+      }),
+      '',
+      `Total: ${SP.fmt.money(x.total)}`,
+      `Paid: ${SP.fmt.money(x.paid || 0)} · Due: ${SP.fmt.money(Math.max(0, x.total - (x.paid || 0)))}`,
+    ];
+    const phone = (cust?.phone || '').replace(/\D/g, '');
+    const url = phone
+      ? `https://wa.me/${phone}?text=${encodeURIComponent(lines.join('\n'))}`
+      : `https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`;
+    window.open(url, '_blank', 'noopener');
+    SP.store.audit('sale.whatsapp', x.ref, phone || 'no recipient number');
+  }
+
+  return MOD;
 })();

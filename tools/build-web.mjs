@@ -55,7 +55,7 @@ async function main() {
     resolve(OUT, 'build-info.json'),
     `${JSON.stringify({
       app: 'StockPilot',
-      version: '1.0.0',
+      version: '2.0.0',
       builtAt: new Date().toISOString(),
     }, null, 2)}\n`,
     'utf8',

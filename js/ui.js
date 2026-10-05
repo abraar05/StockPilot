@@ -123,6 +123,32 @@ SP.modal = function modal(o) {
       if (node) { body.appendChild(node.wrap); fieldNodes.push(node); }
     });
 
+    /* Draft auto-save: restore previous values, persist on input, and
+       clear once the form completes. Protects long forms from refreshes. */
+    if (o.draftId && SP.drafts) {
+      const saved = SP.drafts.load(o.draftId);
+      if (saved) {
+        for (const fn of fieldNodes) {
+          const v = saved[fn.key ?? fn.control?.name];
+          const name = fn.key ?? fn.control?.name;
+          if (v === undefined || !fn.control) continue;
+          if (fn.control.type === 'checkbox') fn.control.checked = !!v;
+          else fn.control.value = v;
+          void name;
+        }
+        const note = SP.el('p.field__hint', 'Draft restored from your last session.');
+        body.prepend(note);
+      }
+      body.addEventListener('input', SP.debounce(() => {
+        const values = {};
+        for (const fn of fieldNodes) {
+          if (!fn.control) continue;
+          values[fn.key] = fn.control.type === 'checkbox' ? fn.control.checked : fn.control.value;
+        }
+        SP.drafts.save(o.draftId, values);
+      }, 450));
+    }
+
     const ctaOk = o.okLabel || 'Confirm';
     const ctl = { resolve };
 
@@ -154,6 +180,7 @@ SP.modal = function modal(o) {
         }
         okBtn.removeAttribute('aria-busy');
       }
+      if (o.draftId && SP.drafts) SP.drafts.clear(o.draftId);
       ctl.close(values);
     });
 
@@ -245,6 +272,7 @@ function buildField(f) {
   return {
     wrap,
     control,
+    key: f.key,
     read() {
       if (f.type === 'checkbox') return { key: f.key, value: control.checked };
       const raw = control.value;

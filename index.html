@@ -5,21 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5" />
 <meta name="theme-color" content="#0b0e14" media="(prefers-color-scheme: dark)" />
 <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
-<meta name="description" content="StockPilot — multi-warehouse inventory intelligence, refill decisions and purchase planning." />
+<meta name="description" content="StockPilot 2.0 — inventory intelligence & warehouse operations: ledger-backed stock, IMEI tracking, transfers, approvals and reports." />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="StockPilot" />
 <meta name="color-scheme" content="dark light" />
-<title>StockPilot · Inventory Intelligence</title>
+<title>StockPilot 2.0 · Inventory Intelligence</title>
 
 <link rel="manifest" href="assets/manifest.webmanifest" />
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
 <link rel="apple-touch-icon" href="assets/icon.svg" />
 
-<link rel="stylesheet" href="css/tokens.css?v=1.0.0" />
-<link rel="stylesheet" href="css/base.css?v=1.0.0" />
-<link rel="stylesheet" href="css/components.css?v=1.0.0" />
-<link rel="stylesheet" href="css/modules.css?v=1.0.0" />
+<link rel="stylesheet" href="css/tokens.css?v=2.0.0" />
+<link rel="stylesheet" href="css/base.css?v=2.0.0" />
+<link rel="stylesheet" href="css/components.css?v=2.0.0" />
+<link rel="stylesheet" href="css/modules.css?v=2.0.0" />
+<link rel="stylesheet" href="css/v2.css?v=2.0.0" />
 </head>
 
 <body>
@@ -29,7 +30,7 @@
   <div class="boot__mark" aria-hidden="true">
     <svg viewBox="0 0 48 48" width="56" height="56"><use href="#glyph" /></svg>
   </div>
-  <div class="boot__name">StockPilot</div>
+  <div class="boot__name">StockPilot <span class="boot__ver">2.0</span></div>
   <div class="boot__bar"><i></i></div>
   <div class="boot__hint" id="bootHint">Preparing your workspace…</div>
 </div>
@@ -224,7 +225,7 @@
   </main>
 
   <footer class="auth__foot">
-    <span id="authBuild">v1.0.0</span>
+    <span id="authBuild">v2.0.0 Professional</span>
     <span class="dot">·</span>
     <button type="button" class="link" data-action="open-help">Help &amp; tips</button>
     <span class="dot">·</span>
@@ -267,6 +268,7 @@
     <div class="sidenav__brand">
       <span aria-hidden="true"><svg viewBox="0 0 48 48" width="26" height="26"><use href="#glyph" /></svg></span>
       <strong>StockPilot</strong>
+      <span class="sidenav__ver">2.0</span>
     </div>
     <div class="sidenav__scroll" id="sidenavLinks"></div>
     <div class="sidenav__foot">
@@ -297,7 +299,7 @@
   <div class="palette__panel">
     <div class="palette__search">
       <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><use href="#search" /></svg>
-      <input id="paletteInput" type="text" placeholder="Search SKUs, pages, actions…"
+      <input id="paletteInput" type="text" placeholder="Search SKUs, IMEIs, documents, pages, actions…"
              autocomplete="off" autocapitalize="off" spellcheck="false" />
       <kbd>Esc</kbd>
     </div>
@@ -311,30 +313,44 @@
 </div>
 
 <!-- ═════════════════════════════════════════════════════════════ SCRIPTS -->
-<script src="js/config.js?v=1.0.0"></script>
-<script src="js/util.js?v=1.0.0"></script>
-<script src="js/crypto.js?v=1.0.0"></script>
-<script src="js/seed.js?v=1.0.0"></script>
-<script src="js/store.js?v=1.0.0"></script>
-<script src="js/engine.js?v=1.0.0"></script>
-<script src="js/charts.js?v=1.0.0"></script>
-<script src="js/ui.js?v=1.0.0"></script>
-<script src="js/auth.js?v=1.0.0"></script>
-<script src="js/sheets.js?v=1.0.0"></script>
+<script src="js/config.js?v=2.0.0"></script>
+<script src="js/util.js?v=2.0.0"></script>
+<script src="js/crypto.js?v=2.0.0"></script>
+<script src="js/seed.js?v=2.0.0"></script>
+<script src="js/seed2.js?v=2.0.0"></script>
+<script src="js/store.js?v=2.0.0"></script>
+<script src="js/ledger.js?v=2.0.0"></script>
+<script src="js/approvals.js?v=2.0.0"></script>
+<script src="js/alerts.js?v=2.0.0"></script>
+<script src="js/impexp.js?v=2.0.0"></script>
+<script src="js/ai.js?v=2.0.0"></script>
+<script src="js/charts.js?v=2.0.0"></script>
+<script src="js/ui.js?v=2.0.0"></script>
+<script src="js/table.js?v=2.0.0"></script>
+<script src="js/auth.js?v=2.0.0"></script>
+<script src="js/sheets.js?v=2.0.0"></script>
 
-<script src="js/modules/dashboard.js?v=1.0.0"></script>
-<script src="js/modules/inventory.js?v=1.0.0"></script>
-<script src="js/modules/refill.js?v=1.0.0"></script>
-<script src="js/modules/warehouses.js?v=1.0.0"></script>
-<script src="js/modules/transfers.js?v=1.0.0"></script>
-<script src="js/modules/sales.js?v=1.0.0"></script>
-<script src="js/modules/purchase.js?v=1.0.0"></script>
-<script src="js/modules/insights.js?v=1.0.0"></script>
-<script src="js/modules/admin.js?v=1.0.0"></script>
-<script src="js/modules/settings.js?v=1.0.0"></script>
-<script src="js/modules/help.js?v=1.0.0"></script>
+<script src="js/modules/_shared.js?v=2.0.0"></script>
+<script src="js/modules/dashboard.js?v=2.0.0"></script>
+<script src="js/modules/inventory.js?v=2.0.0"></script>
+<script src="js/modules/products.js?v=2.0.0"></script>
+<script src="js/modules/devices.js?v=2.0.0"></script>
+<script src="js/modules/warehouses.js?v=2.0.0"></script>
+<script src="js/modules/movements.js?v=2.0.0"></script>
+<script src="js/modules/transfers.js?v=2.0.0"></script>
+<script src="js/modules/sales.js?v=2.0.0"></script>
+<script src="js/modules/purchases.js?v=2.0.0"></script>
+<script src="js/modules/customers.js?v=2.0.0"></script>
+<script src="js/modules/suppliers.js?v=2.0.0"></script>
+<script src="js/modules/verify.js?v=2.0.0"></script>
+<script src="js/modules/approvals.js?v=2.0.0"></script>
+<script src="js/modules/reports.js?v=2.0.0"></script>
+<script src="js/modules/analytics.js?v=2.0.0"></script>
+<script src="js/modules/users.js?v=2.0.0"></script>
+<script src="js/modules/settings.js?v=2.0.0"></script>
+<script src="js/modules/help.js?v=2.0.0"></script>
 
-<script src="js/router.js?v=1.0.0"></script>
-<script src="js/app.js?v=1.0.0"></script>
+<script src="js/router.js?v=2.0.0"></script>
+<script src="js/app.js?v=2.0.0"></script>
 </body>
 </html>

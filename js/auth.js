@@ -41,7 +41,8 @@ SP.auth = (() => {
         name,
         email: email.toLowerCase(),
         role,
-        warehouse: wh,
+        warehouse: wh === '*' ? null : wh,
+        warehouses: wh === '*' ? [] : [wh],
         password: rec,
         pin: pinRec,
         active: true,
@@ -56,11 +57,11 @@ SP.auth = (() => {
     };
 
     s.users.push(
-      await mk('Abraar Ahmed', 'admin@stockpilot.app', 'admin', 'Admin@1234', null, 'MAIN'),
-      await mk('Ahad Shad', 'manager@stockpilot.app', 'manager', 'Manager@123', '2468', 'MAIN'),
-      await mk('Alpana Store', 'alpana@stockpilot.app', 'storekeeper', 'Store@1234', '1357', 'ALPANA'),
-      await mk('Nazrul Store', 'nazrul@stockpilot.app', 'storekeeper', 'Store@1234', '9753', 'NAZRUL'),
-      await mk('Read-only Guest', 'viewer@stockpilot.app', 'viewer', 'Viewer@123', '0000', 'ADMIN'),
+      await mk('Abraar Ahmed', 'admin@stockpilot.app', 'admin', 'Admin@1234', null, '*'),
+      await mk('Ahad Shad', 'manager@stockpilot.app', 'warehouse_manager', 'Manager@123', '2468', '*'),
+      await mk('Store Keeper', 'staff@stockpilot.app', 'warehouse_staff', 'Store@1234', '1357', 'MAIN'),
+      await mk('Sales Person', 'sales@stockpilot.app', 'salesperson', 'Sales@1234', '1122', 'MAIN'),
+      await mk('Read-only Guest', 'viewer@stockpilot.app', 'viewer', 'Viewer@123', '0000', '*'),
     );
     SP.store.saveNow();
     console.info('[auth] seeded demo accounts — change them before production use.');
@@ -76,10 +77,12 @@ SP.auth = (() => {
   const current_ = () => current;
   const isSignedIn = () => !!current;
 
-  const roleOf = (user) => SP.store.state.users.find((u) => u.id === user.id)?.role
-    || user?.role || 'viewer';
+  const normalizeRole = (role) => (SP.ROLE_MIGRATION && SP.ROLE_MIGRATION[role]) || role || 'viewer';
 
-  const roleDef = (roleId) => SP.ROLES.find((r) => r.id === roleId) || SP.ROLES[0];
+  const roleOf = (user) => normalizeRole(SP.store.state.users.find((u) => u.id === user.id)?.role
+    || user?.role || 'viewer');
+
+  const roleDef = (roleId) => SP.ROLES.find((r) => r.id === normalizeRole(roleId)) || SP.ROLES[0];
 
   /** Effective permission list for a role. */
   const permsOf = (roleId) => roleDef(roleId).perms;
@@ -90,15 +93,29 @@ SP.auth = (() => {
     return perms.includes('*') || perms.includes(perm);
   };
 
+  /** All warehouses the user may see. */
+  const visibleWarehouses = (user = current) => {
+    if (!user) return [];
+    if (can('users:manage', user)) return SP.store.state.warehouses.map((w) => w.id);
+    const u = byId(user.id);
+    const scoped = u?.warehouses?.length ? u.warehouses : (u?.warehouse ? [u.warehouse] : []);
+    return scoped.length ? scoped : SP.store.state.warehouses.map((w) => w.id);
+  };
+
   /** Warehouses the user may write to. */
   const scopeOf = (user = current) => {
     if (!user) return [];
-    if (can('edit:anywhere', user) || can('manage:users', user)) {
+    if (can('users:manage', user) || can('warehouses:manage', user)) {
       return SP.store.state.warehouses.map((w) => w.id);
     }
-    const u = byId(user.id);
-    return u?.warehouse ? [u.warehouse] : [];
+    return visibleWarehouses(user);
   };
+
+  /** True when the user may operate in the given warehouse. */
+  const inScope = (warehouseId, user = current) => scopeOf(user).includes(warehouseId);
+
+  /** Saved dashboard layout per user. */
+  const dashboardLayout = () => byId(current?.id)?.dashboardLayout || null;
 
   /* ────────────────────────────────────────────────────── sessions */
 
@@ -343,7 +360,8 @@ SP.auth = (() => {
       name: String(data.name).trim(),
       email,
       role: data.role || 'viewer',
-      warehouse: data.warehouse || 'MAIN',
+      warehouse: data.warehouse || null,
+      warehouses: Array.isArray(data.warehouses) ? data.warehouses : (data.warehouse ? [data.warehouse] : []),
       password: rec,
       pin: pinRec,
       active: true,
@@ -507,7 +525,7 @@ SP.auth = (() => {
 
   return {
     ensureSeedUsers, restore, signIn, signInWithPin, signOut,
-    current: current_, isSignedIn, can, scopeOf, roleOf, roleDef, permsOf,
+    current: current_, isSignedIn, can, scopeOf, visibleWarehouses, inScope, roleOf, roleDef, permsOf, dashboardLayout,
     byEmail, byId, createUser, updateUser, deleteUser, toggleActive,
     resetPassword, changeOwnPassword, setPin, setRecovery, recoverAccess,
     revokeSessions, sessionInfo, deviceLabel, randomColour,

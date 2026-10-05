@@ -1,11 +1,11 @@
 {
-  "name": "StockPilot — Inventory Intelligence",
+  "name": "StockPilot 2.0 — Inventory Intelligence",
   "short_name": "StockPilot",
-  "description": "Multi-warehouse inventory intelligence, refill decisions and purchase planning.",
+  "description": "Inventory intelligence & warehouse operations: ledger-backed stock, IMEI tracking, transfers, approvals and reports.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "background_color": "#0a0d13",
   "theme_color": "#0b0e14",
   "categories": ["business", "productivity", "utilities"],
@@ -20,8 +20,9 @@
     }
   ],
   "shortcuts": [
-    { "name": "Refill Radar", "short_name": "Refill", "url": "./index.html#/refill" },
-    { "name": "Record dispatch", "short_name": "Dispatch", "url": "./index.html#/sales" },
+    { "name": "Receive stock", "short_name": "Receive", "url": "./index.html#/purchases?compose=receive" },
+    { "name": "New transfer", "short_name": "Transfer", "url": "./index.html#/transfers?compose=1" },
+    { "name": "New sale", "short_name": "Sell", "url": "./index.html#/sales?compose=1" },
     { "name": "Inventory", "short_name": "Stock", "url": "./index.html#/inventory" }
   ]
 }

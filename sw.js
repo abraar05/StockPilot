@@ -1,49 +1,51 @@
-/**
- * sw.js — offline shell for StockPilot.
- *
- * Strategy
- *   • App shell (HTML/CSS/JS/icons) → cache-first with a background refresh.
- *     Versioned cache names mean a release is picked up on the next load and
- *     old bundles are dropped automatically.
- *   • Navigations → network-first, falling back to the cached shell so the app
- *     still opens with no connection.
- *   • Google Sheets + Apps Script → never cached. Inventory must never be
- *     served stale from the wrong place.
- */
-
-const VERSION = 'v1.0.0';
+const VERSION = 'v2.0.0';
 const SHELL_CACHE = `stockpilot-shell-${VERSION}`;
 
 const SHELL = [
   './',
   './index.html',
-  './css/tokens.css?v=1.0.0',
-  './css/base.css?v=1.0.0',
-  './css/components.css?v=1.0.0',
-  './css/modules.css?v=1.0.0',
-  './js/config.js?v=1.0.0',
-  './js/util.js?v=1.0.0',
-  './js/crypto.js?v=1.0.0',
-  './js/seed.js?v=1.0.0',
-  './js/store.js?v=1.0.0',
-  './js/engine.js?v=1.0.0',
-  './js/charts.js?v=1.0.0',
-  './js/ui.js?v=1.0.0',
-  './js/auth.js?v=1.0.0',
-  './js/sheets.js?v=1.0.0',
-  './js/router.js?v=1.0.0',
-  './js/app.js?v=1.0.0',
-  './js/modules/dashboard.js?v=1.0.0',
-  './js/modules/inventory.js?v=1.0.0',
-  './js/modules/refill.js?v=1.0.0',
-  './js/modules/warehouses.js?v=1.0.0',
-  './js/modules/transfers.js?v=1.0.0',
-  './js/modules/sales.js?v=1.0.0',
-  './js/modules/purchase.js?v=1.0.0',
-  './js/modules/insights.js?v=1.0.0',
-  './js/modules/admin.js?v=1.0.0',
-  './js/modules/settings.js?v=1.0.0',
-  './js/modules/help.js?v=1.0.0',
+  './css/tokens.css?v=2.0.0',
+  './css/base.css?v=2.0.0',
+  './css/components.css?v=2.0.0',
+  './css/modules.css?v=2.0.0',
+  './css/v2.css?v=2.0.0',
+  './js/config.js?v=2.0.0',
+  './js/util.js?v=2.0.0',
+  './js/crypto.js?v=2.0.0',
+  './js/seed.js?v=2.0.0',
+  './js/seed2.js?v=2.0.0',
+  './js/store.js?v=2.0.0',
+  './js/ledger.js?v=2.0.0',
+  './js/approvals.js?v=2.0.0',
+  './js/alerts.js?v=2.0.0',
+  './js/impexp.js?v=2.0.0',
+  './js/ai.js?v=2.0.0',
+  './js/charts.js?v=2.0.0',
+  './js/ui.js?v=2.0.0',
+  './js/table.js?v=2.0.0',
+  './js/auth.js?v=2.0.0',
+  './js/sheets.js?v=2.0.0',
+  './js/router.js?v=2.0.0',
+  './js/app.js?v=2.0.0',
+  './js/modules/_shared.js?v=2.0.0',
+  './js/modules/dashboard.js?v=2.0.0',
+  './js/modules/inventory.js?v=2.0.0',
+  './js/modules/products.js?v=2.0.0',
+  './js/modules/devices.js?v=2.0.0',
+  './js/modules/warehouses.js?v=2.0.0',
+  './js/modules/movements.js?v=2.0.0',
+  './js/modules/transfers.js?v=2.0.0',
+  './js/modules/sales.js?v=2.0.0',
+  './js/modules/purchases.js?v=2.0.0',
+  './js/modules/customers.js?v=2.0.0',
+  './js/modules/suppliers.js?v=2.0.0',
+  './js/modules/verify.js?v=2.0.0',
+  './js/modules/approvals.js?v=2.0.0',
+  './js/modules/reports.js?v=2.0.0',
+  './js/modules/analytics.js?v=2.0.0',
+  './js/modules/users.js?v=2.0.0',
+  './js/modules/settings.js?v=2.0.0',
+  './js/modules/help.js?v=2.0.0',
   './assets/icon.svg',
   './assets/manifest.webmanifest',
 ];

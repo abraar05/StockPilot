@@ -1,368 +1,362 @@
 /**
- * modules/transfers.js — inter-warehouse movements with a status workflow.
+ * modules/transfers.js — inter-warehouse transfer workflow.
+ *
+ * REQUESTED → APPROVED → PICKING → DISPATCHED → IN TRANSIT → RECEIVED → COMPLETED
+ *
+ * Stock semantics:
+ *  - DISPATCH posts transfer_out at the source (units leave the shelf).
+ *  - RECEIVE posts transfer_in at the destination per received quantity,
+ *    supporting partial receiving and discrepancies (short/excess flagged).
+ *  - REJECT/CANCEL before dispatch posts nothing.
  */
 window.SP = window.SP || {};
 SP.modules = SP.modules || {};
 
 SP.modules.transfers = (() => {
-  const state = { status: 'all' };
+  const state = { q: '', status: 'all' };
 
-  const MOD = {
-    title: 'Transfers',
-    subtitle: () => {
-      const open = SP.store.state.transfers.filter((t) => !['received', 'rejected'].includes(t.status)).length;
-      return `${SP.fmt.pluralise(open, 'transfer')} in flight`;
-    },
-    mount,
-  };
+  const MOD = { title: 'Transfers', subtitle: () => `${SP.fmt.pluralise(SP.store.state.transfers.length, 'transfer')}`, mount, openForm, openTransfer };
 
-  const STATUSES = SP.STATUS.transfer;
+  function rows() {
+    let list = [...SP.store.state.transfers].sort((a, b) => b.createdAt - a.createdAt);
+    if (state.status !== 'all') list = list.filter((t) => t.status === state.status);
+    if (state.q) list = list.filter((t) => `${t.ref} ${t.from} ${t.to} ${t.requester}`.toLowerCase().includes(state.q));
+    return list;
+  }
 
-  async function mount(params) {
+  function mount(params) {
     if (params?.status) state.status = params.status;
-    if (params?.skuId) setTimeout(() => openForm(params), 140);
+    if (params?.compose) setTimeout(() => openForm(), 100);
+    if (params?.id) setTimeout(() => openTransfer(params.id), 100);
+    const root = SP.el('div.stack.gap-3');
 
-    const root = SP.el('div.stack.gap-4');
-    const all = [...SP.store.state.transfers].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+    const table = SP.table.create({
+      columns: [
+        { key: 'ref', label: 'Ref', width: '110px', value: (t) => t.ref, render: (t) => SP.el('strong', t.ref) },
+        { key: 'route', label: 'Route', value: (t) => `${t.from}${t.to}`, render: (t) => SP.el('span', `${whName(t.from)} → ${whName(t.to)}`) },
+        { key: 'units', label: 'Units', width: '80px', align: 'right', value: (t) => SP.sum(t.items, (i) => i.qty), render: (t) => SP.fmt.n(SP.sum(t.items, (i) => i.qty)) },
+        { key: 'status', label: 'Status', width: '130px', value: (t) => t.status, render: (t) => SP.ui2.badge('transfer', t.status, { sm: true }) },
+        { key: 'requester', label: 'Requested by', width: '130px', value: (t) => t.requester },
+        { key: 'createdAt', label: 'Created', width: '110px', value: (t) => t.createdAt, render: (t) => SP.el('span.tiny', SP.fmt.date(t.createdAt)) },
+      ],
+      rows,
+      rowId: (t) => t.id,
+      defaultSort: 'createdAt', defaultDir: 'desc',
+      empty: { icon: 'swap', title: 'No transfers', body: 'Move stock between warehouses with full accountability.' },
+      onRowClick: (t) => openTransfer(t.id),
+    });
 
-    /* ── Pipeline summary ─────────────────────────────────────────── */
-    const open = all.filter((t) => !['received', 'rejected'].includes(t.status));
-    const unitsInFlight = SP.sum(open, (t) => SP.sum(t.lines || [], (l) => l.qty));
+    const filters = SP.ui2.filterBar({
+      placeholder: 'Search ref, warehouse, requester…',
+      onChange: (f) => { state.q = f.q; table.refresh(); },
+    });
 
-    root.appendChild(SP.el('div.hero',
-      SP.el('div.hero__eyebrow', SP.icon('swap'), 'In flight'),
-      SP.el('div',
-        SP.el('div.hero__value', SP.fmt.n(unitsInFlight)),
-        SP.el('p.hero__sub',
-          `${SP.fmt.pluralise(open.length, 'transfer')} moving stock between sites. `,
-          'Every unit transferred here is a unit you do not have to buy.'),
-      ),
-      SP.el('div.hero__split',
-        ...['requested', 'approved', 'in_transit'].map((id) => {
-          const def = STATUSES.find((s) => s.id === id);
-          const n = all.filter((t) => t.status === id).length;
-          return SP.el('div.hero__cell', SP.el('b', SP.fmt.n(n)), SP.el('span', def.label));
-        }),
-      ),
-    ));
+    const chips = SP.chipRow(
+      [{ value: 'all', label: 'All' }, ...SP.STATUS.transfer.map((s) => ({ value: s.id, label: s.label }))],
+      state.status, (v) => { state.status = v; table.refresh(); });
 
-    /* ── New transfer ─────────────────────────────────────────────── */
-    if (SP.auth.can('create:transfer')) {
-      root.appendChild(SP.el('button.btn.btn--primary.btn--lg.btn--block', {
-        type: 'button', onclick: () => openForm(),
-      }, SP.icon('plus'), 'New transfer'));
-    }
+    const actions = [];
+    if (SP.auth.can('transfers:create')) actions.push(SP.el('button.btn.btn--primary.btn--sm', { type: 'button', onclick: () => openForm() }, SP.icon('plus'), 'New transfer'));
 
-    /* ── Filters ──────────────────────────────────────────────────── */
-    root.appendChild(SP.chipRow(
-      [{ value: 'all', label: 'All', count: all.length },
-        ...STATUSES.map((s) => ({ value: s.id, label: s.label, count: all.filter((t) => t.status === s.id).length }))]
-        .filter((c) => c.count > 0 || c.value === 'all' || c.value === state.status),
-      state.status,
-      (v) => { state.status = v; SP.router.refresh(); },
-    ));
-
-    /* ── Board ────────────────────────────────────────────────────── */
-    const rows = state.status === 'all' ? all : all.filter((t) => t.status === state.status);
-
-    if (!rows.length) {
-      root.appendChild(SP.el('div.card', SP.empty({
-        icon: 'swap',
-        title: 'No transfers yet',
-        body: 'Moving stock between sites is the cheapest way to fix a shortfall. Create one when a site runs low.',
-        action: SP.auth.can('create:transfer')
-          ? { label: 'New transfer', onClick: () => openForm() } : null,
-      })));
-      return root;
-    }
-
-    const cols = ['requested', 'approved', 'in_transit', 'received'];
-    root.appendChild(SP.el('div.kanban', ...cols.map((cid) => {
-      const def = STATUSES.find((s) => s.id === cid);
-      const items = rows.filter((t) => t.status === cid);
-      return SP.el('div.kcol',
-        SP.el('div.kcol__head',
-          SP.el('span.tag', { class: `tag--${def.tone}` }, def.label),
-          SP.el('h3', String(items.length)),
-        ),
-        SP.el('div.kcol__body', ...(items.length
-          ? items.map((t) => transferCard(t))
-          : [SP.el('p.tiny.mute', { style: { padding: 'var(--sp-3)', textAlign: 'center' } }, 'Nothing here')])),
-      );
-    })));
-
+    root.append(
+      SP.ui2.pageHead({ title: 'Transfers', sub: 'Requested → approved → dispatched → received. Fully accountable.', actions }),
+      filters.el, chips, table.el,
+    );
     return root;
   }
 
-  function transferCard(t) {
-    const from = SP.store.state.warehouses.find((w) => w.id === t.from);
-    const to = SP.store.state.warehouses.find((w) => w.id === t.to);
-    const units = SP.sum(t.lines || [], (l) => l.qty);
-    const first = (t.lines || [])[0];
-    const sku = first ? SP.store.state.skus.find((s) => s.id === first.skuId) : null;
-    const def = STATUSES.find((s) => s.id === t.status);
+  const whName = (id) => SP.store.state.warehouses.find((w) => w.id === id)?.name || id;
 
-    return SP.el('button.kcard', { type: 'button', onclick: () => openDetail(t.id) },
-      SP.el('div.kcard__top',
-        SP.el('span.kcard__id', t.ref),
-        SP.el('span.tag', { class: `tag--${def.tone}` }, def.label),
-      ),
-      SP.el('div.kcard__title', sku ? `${SP.fmt.shortSku(sku.sku, sku.specs, 30)}` : `${t.lines?.length || 0} lines`),
-      SP.el('div.kcard__meta',
-        SP.el('span', `${from?.short || t.from} → ${to?.short || t.to}`),
-        SP.el('span.badge', { style: { marginLeft: 'auto' } }, SP.fmt.n(units)),
-      ),
-      (t.lines?.length || 0) > 1 ? SP.el('p.tiny.mute', `+${t.lines.length - 1} more line${t.lines.length > 2 ? 's' : ''}`) : null,
-      SP.el('div.kcard__foot',
-        SP.el('span.tiny.mute', SP.fmt.ago(t.at)),
-        SP.el('span.tiny.mute', { style: { marginLeft: 'auto' } }, t.by || ''),
-      ),
-    );
-  }
+  /* ══════════════════════════════════════════════════════════ CREATE */
 
-  /* ────────────────────────────────────────────────── create form */
-
-  function openForm(prefill = {}) {
-    if (!SP.auth.can('create:transfer')) {
-      SP.ui.toast({ tone: 'warn', title: 'Not permitted', body: 'Your role cannot create transfers.' });
-      return;
-    }
-
+  async function openForm(preset = {}) {
     const s = SP.store.state;
-    const body = SP.el('div.stack.gap-4');
-    let lines = [];
+    const items = [...(preset.items || [])];
 
-    // Seed from prefill (e.g. arriving from a rebalance suggestion).
-    if (prefill.skuId) {
-      lines = [{ skuId: prefill.skuId, qty: prefill.qty || 1 }];
-    }
-
-    const fromSel = SP.el('select.select', { id: 'tfFrom' },
-      ...s.warehouses.map((w) => SP.el('option', {
-        value: w.id, selected: prefill.from ? w.id === prefill.from : w.id === (SP.auth.scopeOf()[0] || 'MAIN'),
-      }, w.label)),
-    );
-    const toSel = SP.el('select.select', { id: 'tfTo' },
-      ...s.warehouses.map((w) => SP.el('option', {
-        value: w.id, selected: w.id === (prefill.to || (s.prefs.warehouse === 'MAIN' ? 'ADMIN' : 'MAIN')),
-      }, w.label)),
-    );
-    const noteInput = SP.el('textarea.textarea', { id: 'tfNote', placeholder: 'Reason, vehicle, contact…' });
-
-    const linesHost = SP.el('div.stack.gap-2');
-
-    function renderLines() {
-      SP.clear(linesHost);
-      linesHost.appendChild(SP.el('div.row.gap-2',
-        SP.el('div.grow.tiny.mute', { style: { fontWeight: '650' } }, 'Items'),
-        SP.el('span.tiny.mute', `${SP.fmt.pluralise(lines.length, 'line')} · ${SP.fmt.n(SP.sum(lines, (l) => l.qty))} units`),
-      ));
-
-      if (!lines.length) {
-        linesHost.appendChild(SP.el('p.tiny.mute', { style: { padding: 'var(--sp-3) 0' } }, 'No items added yet.'));
-      }
-
-      lines.forEach((line, i) => {
-        const sku = s.skus.find((x) => x.id === line.skuId);
-        const avail = Number(sku?.byWh?.[fromSel.value]) || 0;
-        const qtyInput = SP.el('input.input.input--num', {
-          type: 'number', min: 1, max: avail || 9999, value: line.qty,
-          'aria-label': 'Quantity',
-          oninput: (e) => { line.qty = SP.clamp(e.target.value, 1, 99999); renderLines(); },
-        });
-        linesHost.appendChild(SP.el('div.card.card--flat.card--tight.row.gap-2',
-          SP.el('div.grow',
-            SP.el('strong', { style: { fontSize: 'var(--fs-md)' } }, sku?.sku || 'Unknown SKU'),
-            SP.el('p.tiny.mute', `${sku?.specs || ''} · ${SP.fmt.n(avail)} available at ${fromSel.value}`),
-          ),
-          SP.el('div', { style: { width: '96px' } }, qtyInput),
-          SP.el('button.btn.btn--icon.btn--sm.btn--quiet', {
-            type: 'button', 'aria-label': 'Remove line',
-            onclick: () => { lines.splice(i, 1); renderLines(); },
-          }, SP.icon('trash')),
-        ));
+    const itemsHost = SP.el('div.stack.gap-1');
+    const drawItems = () => {
+      SP.clear(itemsHost);
+      items.forEach((it, idx) => {
+        const p = s.products.find((x) => x.id === it.productId);
+        itemsHost.appendChild(SP.el('div.lrow',
+          SP.el('span.lrow__ico', SP.icon('box')),
+          SP.el('div.lrow__main', SP.el('strong', p?.name || it.productId)),
+          SP.el('div.row.gap-1', { style: { alignItems: 'center' } },
+            SP.el('input.input.input--num', {
+              type: 'number', min: 1, value: it.qty, style: { width: '76px' },
+              onchange: (e) => { it.qty = Math.max(1, Number(e.target.value) || 1); },
+            }),
+            SP.el('button.btn.btn--icon.btn--sm.btn--quiet', { type: 'button', 'aria-label': 'Remove line', onclick: () => { items.splice(idx, 1); drawItems(); } }, SP.icon('x')))));
       });
+      itemsHost.appendChild(SP.el('button.btn.btn--ghost.btn--sm.btn--block', {
+        type: 'button',
+        onclick: async () => {
+          const p = await SP.ui2.pickProduct({ title: 'Add product to transfer' });
+          if (!p) return;
+          const existing = items.find((i) => i.productId === p.id);
+          if (existing) existing.qty += 1; else items.push({ productId: p.id, qty: 1 });
+          drawItems();
+        },
+      }, SP.icon('plus'), 'Add product'));
+    };
+    drawItems();
 
-      linesHost.appendChild(SP.el('button.btn.btn--ghost.btn--sm.btn--block', {
-        type: 'button', onclick: addLine,
-      }, SP.icon('plus'), 'Add item'));
-    }
-
-    async function addLine() {
-      const res = await SP.modal({
-        title: 'Add item',
-        subtitle: `Stock currently held at ${fromSel.value}`,
-        icon: 'box',
-        fields: [{
-          key: 'skuId', label: 'SKU', type: 'select',
-          value: lines[0]?.skuId || s.skus[0]?.id,
-          options: s.skus.filter((x) => !x.archived).map((x) => ({
-            value: x.id,
-            label: `${SP.fmt.shortSku(x.sku, x.specs, 34)} · ${SP.fmt.n(Number(x.byWh?.[fromSel.value]) || 0)} at ${fromSel.value}`,
-          })),
-        }],
-        okLabel: 'Add',
-      });
-      if (res && res.skuId) {
-        const existing = lines.find((l) => l.skuId === res.skuId);
-        if (existing) existing.qty += 1;
-        else lines.push({ skuId: res.skuId, qty: 1 });
-        renderLines();
-      }
-    }
-
-    body.appendChild(SP.el('div.grid-form',
-      SP.el('div.field', SP.el('label.field__label', 'From'), fromSel),
-      SP.el('div.field', SP.el('label.field__label', 'To'), toSel),
-    ));
-    body.appendChild(SP.el('div.field', SP.el('label.field__label', 'Items'), linesHost));
-    body.appendChild(SP.el('div.field', SP.el('label.field__label', 'Note'), noteInput));
-
-    renderLines();
-
-    SP.modal({
+    const res = await SP.modal({
       title: 'New transfer',
-      subtitle: 'Moving stock is cheaper than buying it',
-      icon: 'swap',
-      body,
-      okLabel: 'Submit request',
-      onOk: () => {
-        if (fromSel.value === toSel.value) throw new Error('Choose two different sites.');
-        if (!lines.length) throw new Error('Add at least one item.');
-
-        for (const l of lines) {
-          const sku = s.skus.find((x) => x.id === l.skuId);
-          const avail = Number(sku?.byWh?.[fromSel.value]) || 0;
-          if (l.qty > avail) {
-            throw new Error(`${sku?.sku || 'Item'}: only ${SP.fmt.n(avail)} available at ${fromSel.value}.`);
+      subtitle: 'Stock stays put until you dispatch.',
+      icon: 'swap', okLabel: 'Request transfer',
+      draftId: 'transfer-new',
+      body: SP.el('div.stack.gap-2', SP.el('strong', { class: 'tiny mute' }, 'LINES'), itemsHost),
+      fields: [
+        { key: 'from', label: 'From warehouse', type: 'select', required: true, options: whOptions('write'), value: preset.from || SP.auth.scopeOf()[0] },
+        { key: 'to', label: 'To warehouse', type: 'select', required: true, options: SP.store.state.warehouses.filter((w) => w.active).map((w) => ({ value: w.id, label: w.name })) },
+        { key: 'carrier', label: 'Carrier / method', placeholder: 'e.g. Pathao courier, own van' },
+        { key: 'notes', label: 'Notes', type: 'textarea' },
+      ],
+      onOk: async (v) => {
+        if (!items.length) throw new Error('Add at least one product line.');
+        if (v.from === v.to) throw new Error('Source and destination must differ.');
+        for (const it of items) {
+          const avail = SP.ledger.stockOf(it.productId, v.from);
+          if (it.qty > avail) {
+            const p = SP.store.state.products.find((x) => x.id === it.productId);
+            throw new Error(`${p?.name}: only ${avail} available at ${whName(v.from)}.`);
           }
         }
-
-        const ref = SP.ref('TR', SP.store.state.transfers.length + 1);
-        const record = {
-          id: SP.uid('tr'),
-          ref,
-          at: Date.now(),
-          from: fromSel.value,
-          to: toSel.value,
-          note: noteInput.value.trim(),
+        const transfer = {
+          id: SP.uid('trf'),
+          ref: SP.store.nextRef('transfer'),
+          from: v.from, to: v.to,
+          items: items.map((i) => ({ productId: i.productId, qty: i.qty, receivedQty: 0, deviceIds: [] })),
           status: 'requested',
-          by: SP.auth.currentUser?.name || '',
-          lines: lines.map((l) => ({ ...l })),
+          requester: SP.auth.current()?.name || 'system',
+          approver: null, receiver: null,
+          carrier: v.carrier || '', tracking: '', notes: v.notes || '',
+          history: [{ at: Date.now(), by: SP.auth.current()?.name || 'system', action: 'requested', note: v.notes || '' }],
+          createdAt: Date.now(), updatedAt: Date.now(),
         };
-        SP.store.update(['transfers'], (st) => { st.transfers.unshift(record); });
-        SP.store.audit('transfer.create', ref, `${fromSel.value} → ${toSel.value}`);
-        SP.sheets.push({ type: 'transfer.create', ...record });
-        SP.store.notify({
-          tone: 'info', title: 'Transfer requested',
-          body: `${ref} · ${fromSel.value} → ${toSel.value}`,
+        SP.store.update(['transfers'], (st) => { st.transfers.unshift(transfer); });
+        SP.store.audit('transfer.create', transfer.ref, `${whName(v.from)} → ${whName(v.to)} · ${SP.sum(items, (i) => i.qty)} units`);
+        SP.store.notify({ tone: 'info', kind: 'transfer', route: 'transfers', title: `Transfer ${transfer.ref} requested`, body: `${whName(v.from)} → ${whName(v.to)}` });
+        SP.ui.toast({ tone: 'ok', title: `Transfer ${transfer.ref} requested` });
+        SP.router.refresh();
+        openTransfer(transfer.id);
+      },
+    });
+    return res;
+  }
+
+  /* ══════════════════════════════════════════════════════════ DETAIL */
+
+  function openTransfer(id) {
+    const t = SP.store.state.transfers.find((x) => x.id === id);
+    if (!t) return;
+    const s = SP.store.state;
+
+    const itemRows = t.items.map((it) => {
+      const p = s.products.find((x) => x.id === it.productId);
+      const discrepant = ['received', 'completed'].includes(t.status) && (it.receivedQty ?? 0) !== it.qty;
+      return SP.el('div.lrow',
+        SP.el('span.lrow__ico', SP.icon('box')),
+        SP.el('div.lrow__main', SP.el('strong', p?.name || it.productId), SP.el('small', `${it.deviceIds?.length || 0} devices · sent ${it.qty} · received ${it.receivedQty ?? 0}`)),
+        discrepant ? SP.ui2.tag(`Δ ${it.receivedQty - it.qty}`, 'danger') : SP.el('span.lrow__val', SP.fmt.n(it.qty)));
+    });
+
+    const next = NEXT_ACTIONS[t.status] || [];
+    const actions = next.filter((a) => SP.auth.can(a.perm)).map((a) => SP.el('button.btn', {
+      type: 'button', class: a.danger ? 'btn--danger' : 'btn--primary',
+      onclick: () => a.run(t),
+    }, a.icon ? SP.icon(a.icon) : null, a.label));
+    actions.push(SP.el('button.btn.btn--ghost', { type: 'button', onclick: () => printTransfer(t) }, SP.icon('print'), 'Print'));
+
+    SP.sheet({
+      title: `Transfer ${t.ref}`,
+      subtitle: `${whName(t.from)} → ${whName(t.to)}`,
+      content: SP.el('div.stack.gap-3',
+        SP.el('div.row.gap-2', { style: { alignItems: 'center', flexWrap: 'wrap' } },
+          SP.ui2.badge('transfer', t.status), t.legacy ? SP.ui2.tag('Legacy import', 'mute') : null,
+          t.items.some((i) => (i.receivedQty ?? i.qty) !== i.qty && ['received', 'completed'].includes(t.status)) ? SP.ui2.tag('Discrepancy', 'danger') : null),
+        SP.el('dl.kv',
+          SP.el('dt', 'Requested by'), SP.el('dd', t.requester || '—'),
+          SP.el('dt', 'Approver'), SP.el('dd', t.approver || '—'),
+          SP.el('dt', 'Received by'), SP.el('dd', t.receiver || '—'),
+          SP.el('dt', 'Carrier'), SP.el('dd', t.carrier || '—'),
+          SP.el('dt', 'Tracking'), SP.el('dd', t.tracking || '—'),
+          SP.el('dt', 'Created'), SP.el('dd', SP.fmt.dateTime(t.createdAt))),
+        SP.el('div', SP.el('strong', { style: { display: 'block', marginBottom: 'var(--sp-2)' } }, 'Lines'), SP.el('div.stack.gap-1', ...itemRows)),
+        SP.el('div', SP.el('strong', { style: { display: 'block', marginBottom: 'var(--sp-2)' } }, 'History'),
+          SP.ui2.timeline(t.history.map((h) => ({ at: h.at, title: SP.fmt.titleCase(h.action.replace(/_/g, ' ')), body: h.note, meta: h.by })))),
+      ),
+      actions,
+    });
+  }
+
+  function transition(t, status, note, extra = {}) {
+    SP.store.update(['transfers'], (s) => {
+      const x = s.transfers.find((y) => y.id === t.id);
+      Object.assign(x, { status, updatedAt: Date.now(), ...extra });
+      x.history.push({ at: Date.now(), by: SP.auth.current()?.name || 'system', action: status, note: note || '' });
+    });
+    SP.store.audit(`transfer.${status}`, t.ref, note || '');
+    SP.store.notify({ tone: 'info', kind: 'transfer', route: 'transfers', title: `Transfer ${t.ref} ${SP.statusOf('transfer', status).label.toLowerCase()}`, body: `${whName(t.from)} → ${whName(t.to)}` });
+  }
+
+  const NEXT_ACTIONS = {
+    requested: [
+      { id: 'approve', label: 'Approve', icon: 'check', perm: 'transfers:approve', run: (t) => {
+        const total = SP.sum(t.items, (i) => i.qty);
+        const outcome = SP.approvals.guard('transfer', { qty: total }, {
+          title: `Transfer ${t.ref}: ${total} units ${whName(t.from)} → ${whName(t.to)}`,
+          refType: 'transfer', refId: t.id,
+          resumeKey: 'transfer_approve', resumeData: { transferId: t.id },
+        }, () => transition(t, 'approved', '', { approver: SP.auth.current()?.name }));
+        if (outcome.status === 'pending') SP.ui.toast({ tone: 'info', title: 'Sent for approval', body: 'Large transfers need admin sign-off.' });
+      } },
+      { id: 'reject', label: 'Reject', icon: 'x', perm: 'transfers:approve', danger: true, run: async (t) => {
+        const r = await SP.modal({ title: `Reject ${t.ref}?`, fields: [{ key: 'note', label: 'Reason', required: true }], okLabel: 'Reject', tone: 'danger' });
+        if (r) transition(t, 'rejected', r.note);
+      } },
+    ],
+    approved: [
+      { id: 'pick', label: 'Start picking', icon: 'box', perm: 'transfers:dispatch', run: (t) => transition(t, 'picking') },
+      { id: 'cancel', label: 'Cancel', icon: 'x', perm: 'transfers:create', danger: true, run: (t) => transition(t, 'cancelled') },
+    ],
+    picking: [
+      { id: 'dispatch', label: 'Dispatch', icon: 'truck', perm: 'transfers:dispatch', run: (t) => dispatchForm(t) },
+      { id: 'cancel', label: 'Cancel', icon: 'x', perm: 'transfers:create', danger: true, run: (t) => transition(t, 'cancelled') },
+    ],
+    dispatched: [
+      { id: 'receive', label: 'Receive', icon: 'download', perm: 'transfers:receive', run: (t) => receiveForm(t) },
+      { id: 'mark_transit', label: 'Mark in transit', icon: 'route', perm: 'transfers:dispatch', run: (t) => transition(t, 'in_transit') },
+    ],
+    in_transit: [
+      { id: 'receive', label: 'Receive', icon: 'download', perm: 'transfers:receive', run: (t) => receiveForm(t) },
+    ],
+    received: [
+      { id: 'complete', label: 'Complete', icon: 'checkCircle', perm: 'transfers:receive', run: (t) => transition(t, 'completed', '', { receiver: SP.auth.current()?.name }) },
+    ],
+  };
+
+  /** Dispatch: pick devices for serialized products, post transfer_out. */
+  async function dispatchForm(t) {
+    const s = SP.store.state;
+    for (const item of t.items) {
+      const p = s.products.find((x) => x.id === item.productId);
+      if (p?.serialized) {
+        const devices = await SP.ui2.pickDevices({
+          productId: p.id, warehouseId: t.from, qty: item.qty,
+          title: `Pick ${item.qty} × ${p.name}`,
         });
-        SP.ui.toast({ tone: 'ok', title: 'Transfer created', body: ref });
+        if (!devices) return; // aborted
+        if (devices.length !== item.qty) {
+          SP.ui.toast({ tone: 'warn', title: `Need exactly ${item.qty} devices`, body: `Selected ${devices.length}.` });
+          return;
+        }
+        item.deviceIds = devices.map((d) => d.id);
+      }
+    }
+    const r = await SP.modal({
+      title: `Dispatch ${t.ref}`, icon: 'truck', okLabel: 'Dispatch',
+      fields: [
+        { key: 'carrier', label: 'Carrier', value: t.carrier },
+        { key: 'tracking', label: 'Tracking / reference', value: t.tracking },
+        { key: 'note', label: 'Note' },
+      ],
+      onOk: async (v) => {
+        const moves = t.items.map((item) => ({
+          type: 'transfer_out', productId: item.productId, qty: item.qty,
+          warehouseId: t.from, deviceIds: item.deviceIds || [],
+          refType: 'transfer', refId: t.id, reason: `Transfer ${t.ref} dispatched to ${whName(t.to)}`,
+        }));
+        SP.ledger.postBatch(moves);
+        transition(t, 'dispatched', v.note || '', { carrier: v.carrier || t.carrier, tracking: v.tracking || t.tracking });
+        SP.ui.toast({ tone: 'ok', title: `${t.ref} dispatched`, body: `${SP.sum(t.items, (i) => i.qty)} units left ${whName(t.from)}.` });
         SP.router.refresh();
       },
     });
+    return r;
   }
 
-  /* ────────────────────────────────────────────────── detail sheet */
+  /** Receive: confirm quantities per line; post transfer_in. */
+  async function receiveForm(t) {
+    const s = SP.store.state;
+    const inputs = t.items.map((item) => {
+      const p = s.products.find((x) => x.id === item.productId);
+      const remaining = item.qty - (item.receivedQty || 0);
+      const input = SP.el('input.input.input--num', { type: 'number', min: 0, max: remaining, value: remaining, style: { width: '84px' } });
+      return { item, p, remaining, input, node: SP.el('div.lrow',
+        SP.el('span.lrow__ico', SP.icon('box')),
+        SP.el('div.lrow__main', SP.el('strong', p?.name || item.productId), SP.el('small', `awaiting ${remaining} of ${item.qty}`)),
+        input) };
+    });
 
-  function openDetail(id) {
-    const t = SP.store.state.transfers.find((x) => x.id === id);
-    if (!t) return;
-    const from = SP.store.state.warehouses.find((w) => w.id === t.from);
-    const to = SP.store.state.warehouses.find((w) => w.id === t.to);
-    const def = STATUSES.find((s) => s.id === t.status);
-
-    const body = SP.el('div.stack.gap-4',
-      SP.el('div.row.gap-3',
-        SP.el('div.grow',
-          SP.el('div', { style: { fontFamily: 'var(--font-num)', fontSize: 'var(--fs-2xl)', fontWeight: '750' } }, SP.fmt.n(SP.sum(t.lines || [], (l) => l.qty))),
-          SP.el('div.tiny.mute', `units · ${from?.label} → ${to?.label}`),
-        ),
-        SP.el('span.tag', { class: `tag--${def.tone}` }, def.label),
-      ),
-      t.note ? SP.el('div.callout', { dataset: { tone: 'info' } },
-        SP.el('span.callout__ico', SP.icon('info')),
-        SP.el('div.callout__body', SP.el('p', t.note)),
-      ) : null,
-      SP.el('div.stacklist', ...(t.lines || []).map((l) => {
-        const sku = SP.store.state.skus.find((x) => x.id === l.skuId);
-        return SP.el('div.card.card--flat.card--tight.row.gap-3',
-          SP.el('div.grow',
-            SP.el('strong', sku?.sku || 'SKU'),
-            SP.el('p.tiny.mute', sku?.specs || ''),
-          ),
-          SP.el('b.num', SP.fmt.n(l.qty)),
-        );
-      })),
-      SP.el('dl.kv',
-        SP.el('dt', 'Reference'), SP.el('dd', SP.el('code', t.ref)),
-        SP.el('dt', 'Raised by'), SP.el('dd', t.by || '—'),
-        SP.el('dt', 'Raised at'), SP.el('dd', SP.fmt.dateTime(t.at)),
-      ),
-    );
-
-    const actions = [SP.el('button.btn.btn--ghost', { type: 'button', onclick: () => ctl.close() }, 'Close')];
-
-    const next = { requested: 'approved', approved: 'in_transit', in_transit: 'received' }[t.status];
-    if (next && SP.auth.can('approve:po')) {
-      const label = { approved: 'Approve', in_transit: 'Mark in transit', received: 'Confirm receipt' }[next];
-      const btn = SP.el('button.btn.btn--primary', { type: 'button' }, label);
-      btn.addEventListener('click', () => advance(t.id, next));
-      actions.push(btn);
-    }
-    if (t.status === 'requested' && SP.auth.can('approve:po')) {
-      const rej = SP.el('button.btn.btn--ghost', { type: 'button' }, 'Reject');
-      rej.addEventListener('click', () => advance(t.id, 'rejected'));
-      actions.splice(1, 0, rej);
-    }
-
-    const ctl = SP.sheet({ title: `Transfer ${t.ref}`, content: body, actions });
-  }
-
-  async function advance(id, status) {
-    const t = SP.store.state.transfers.find((x) => x.id === id);
-    if (!t) return;
-
-    if (status === 'rejected') {
-      const ok = await SP.modal({
-        title: 'Reject transfer?', subtitle: t.ref, icon: 'alert', tone: 'danger',
-        okLabel: 'Reject transfer',
-        body: SP.el('p', 'The request will be closed. Stock levels are unchanged.'),
-      });
-      if (!ok) return;
-    }
-
-    SP.store.update(['transfers'], (st) => {
-      const x = st.transfers.find((v) => v.id === id);
-      if (!x) return;
-      x.status = status;
-      x.updatedAt = Date.now();
-
-      // Receiving a transfer moves units between sites. The per-colour
-      // breakdown is a network-wide view of the same total, so it is
-      // deliberately left untouched.
-      if (status === 'received') {
-        for (const l of x.lines || []) {
-          const sku = st.skus.find((s) => s.id === l.skuId);
-          if (!sku) continue;
-          const available = Number(sku.byWh?.[x.from]) || 0;
-          const move = Math.min(l.qty, available);
-          if (move <= 0) continue;
-          sku.byWh[x.from] = available - move;
-          sku.byWh[x.to] = (Number(sku.byWh?.[x.to]) || 0) + move;
-          sku.updatedAt = Date.now();
+    const r = await SP.modal({
+      title: `Receive ${t.ref}`,
+      subtitle: 'Confirm what actually arrived. Differences are flagged as discrepancies.',
+      icon: 'download', okLabel: 'Confirm receiving',
+      body: SP.el('div.stack.gap-1', ...inputs.map((x) => x.node)),
+      fields: [{ key: 'note', label: 'Receiving note (damage, shortage…)' }],
+      onOk: async (v) => {
+        const moves = [];
+        let anyReceived = 0; let anyDiscrepancy = false;
+        for (const x of inputs) {
+          const qty = Number(x.input.value) || 0;
+          if (qty < 0 || qty > x.remaining) throw new Error(`${x.p?.name}: enter 0–${x.remaining}.`);
+          if (qty !== x.remaining) anyDiscrepancy = true;
+          if (qty > 0) {
+            anyReceived += qty;
+            moves.push({
+              type: 'transfer_in', productId: x.item.productId, qty,
+              warehouseId: t.to, deviceIds: x.item.deviceIds || [],
+              refType: 'transfer', refId: t.id, reason: `Transfer ${t.ref} received from ${whName(t.from)}`,
+            });
+          }
         }
-      }
+        if (!anyReceived) throw new Error('Receive at least one unit, or cancel.');
+        SP.ledger.postBatch(moves);
+        SP.store.update(['transfers'], (st) => {
+          const x = st.transfers.find((y) => y.id === t.id);
+          for (const inp of inputs) inp.item.receivedQty = (inp.item.receivedQty || 0) + (Number(inp.input.value) || 0);
+        });
+        const allDone = t.items.every((i) => (i.receivedQty || 0) >= i.qty);
+        transition(t, allDone ? 'received' : 'received', v.note || (anyDiscrepancy ? 'Received with discrepancy' : ''), { receiver: SP.auth.current()?.name });
+        if (anyDiscrepancy) {
+          SP.store.notify({ tone: 'warn', kind: 'transfer', priority: 'high', route: 'transfers', title: `Discrepancy on ${t.ref}`, body: 'Received quantities differ from dispatched quantities.' });
+        }
+        SP.ui.toast({ tone: 'ok', title: `${t.ref} received`, body: anyDiscrepancy ? 'Discrepancy recorded.' : 'All lines matched.' });
+        SP.router.refresh();
+      },
     });
-
-    SP.store.audit('transfer.status', t.ref, status);
-    SP.sheets.push({ type: 'transfer.status', ref: t.ref, status });
-    SP.ui.toast({
-      tone: 'ok', title: `Transfer ${status.replace('_', ' ')}`,
-      body: status === 'received' ? 'Stock levels updated at both sites.' : t.ref,
-    });
-    SP.router.refresh();
+    return r;
   }
 
-  return { ...MOD, openForm, openDetail };
+  /* resume after approval */
+  SP.approvals.registerResume('transfer_approve', (d) => {
+    const t = SP.store.state.transfers.find((x) => x.id === d.transferId);
+    if (t && t.status === 'requested') transition(t, 'approved', 'Approved via approval engine', { approver: 'approval engine' });
+  });
+
+  /* ─────────────────────────────────────────────────────── print */
+
+  function printTransfer(t) {
+    const s = SP.store.state;
+    SP.impexp.printDocument({
+      title: `Stock Transfer ${t.ref}`,
+      subtitle: `${whName(t.from)} → ${whName(t.to)} · ${SP.statusOf('transfer', t.status).label} · ${SP.fmt.dateTime(t.createdAt)}`,
+      bodyHtml: SP.impexp.tableHtml(
+        ['Product', 'Sent', 'Received', 'IMEIs'],
+        t.items.map((i) => [
+          s.products.find((x) => x.id === i.productId)?.name || i.productId,
+          i.qty, i.receivedQty ?? '—',
+          (i.deviceIds || []).map((d) => s.devices.find((x) => x.id === d)?.imei1).filter(Boolean).join(', ') || '—',
+        ])) + `<p style="margin-top:14px">Requested by: ${SP.esc(t.requester || '—')} · Approver: ${SP.esc(t.approver || '—')} · Receiver: ${SP.esc(t.receiver || '—')}</p>
+        <div style="display:flex;gap:60px;margin-top:46px"><span>Dispatch signature: ____________</span><span>Receiving signature: ____________</span></div>`,
+    });
+  }
+
+  const whOptions = (scope) => SP.store.state.warehouses
+    .filter((w) => w.active && (scope !== 'write' || SP.auth.inScope(w.id)))
+    .map((w) => ({ value: w.id, label: w.name }));
+
+  return MOD;
 })();

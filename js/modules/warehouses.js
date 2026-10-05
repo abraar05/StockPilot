@@ -1,254 +1,325 @@
 /**
- * modules/warehouses.js — multi-site network view.
- * Distribution matrix, site health, and the "pull from a sibling site" flow.
+ * modules/warehouses.js — warehouse network: dashboards, valuation,
+ * capacity and per-warehouse stock.
  */
 window.SP = window.SP || {};
 SP.modules = SP.modules || {};
 
 SP.modules.warehouses = (() => {
-  const state = { selected: null, sort: 'units' };
+  const MOD = { title: 'Warehouses', subtitle: () => `${SP.fmt.pluralise(SP.store.state.warehouses.length, 'site')}`, mount, editWarehouse };
 
-  const MOD = {
-    title: 'Warehouses',
-    subtitle: () => {
-      const n = SP.engine.warehouseBreakdown().length;
-      return `${SP.fmt.pluralise(n, 'site')} in the network`;
-    },
-    mount,
-  };
+  function mount(params) {
+    if (params?.id) return detail(params.id);
+    const root = SP.el('div.stack.gap-3');
+    const s = SP.store.state;
 
-  async function mount(params) {
-    if (params?.id) state.selected = params.id;
-    const root = SP.el('div.stack.gap-4');
-    const list = SP.engine.warehouseBreakdown();
-    const overall = SP.engine.summary();
-
-    /* ── Network header ───────────────────────────────────────────── */
-    const maxUnits = Math.max(1, ...list.map((w) => w.units));
-    root.appendChild(SP.el('div.hero',
-      SP.el('div.hero__eyebrow', SP.icon('route'), 'Network'),
-      SP.el('div',
-        SP.el('div.hero__value', SP.fmt.n(overall.gross)),
-        SP.el('p.hero__sub',
-          `Units spread across ${SP.fmt.pluralise(list.length, 'warehouse')}. `,
-          `The largest holds ${SP.fmt.pct(list[0] ? list[0].share : 0, 0)} of the network.`),
-      ),
-      SP.el('div.hero__split',
-        ...list.slice(0, 3).map((w) => SP.el('div.hero__cell',
-          SP.el('b', { style: { color: w.color } }, SP.fmt.compact(w.units)),
-          SP.el('span', w.short || w.label),
-        )),
-      ),
-    ));
-
-    /* ── Site cards ───────────────────────────────────────────────── */
-    root.appendChild(SP.section('Sites', 'Tap a site to inspect its stock and rebalance it',
-      SP.el('div.grid.grid--2', ...list.map((w) => siteCard(w, maxUnits))),
-    ));
-
-    /* ── Distribution matrix (warehouse × brand) ──────────────────── */
-    root.appendChild(SP.section('Distribution', 'Where each brand sits across the network',
-      SP.el('div.card',
-        SP.el('div.card__body.stack.gap-4',
-          SP.charts.stacked({
-            label: 'Brand distribution',
-            rows: buildBrandStack(),
-            format: (v) => SP.fmt.n(v),
-          }),
-          SP.el('div.chart__legend', ...list.map((w) => SP.el('div.chart__legend-item',
-            SP.el('i.chart__legend-swatch', { style: { background: w.color } }),
-            w.label,
-            SP.el('b', SP.fmt.n(w.units)),
-          ))),
-        ),
-      ),
-    ));
-
-    /* ── Selected site detail ─────────────────────────────────────── */
-    if (state.selected && list.some((w) => w.id === state.selected)) {
-      root.appendChild(siteDetail(state.selected));
+    const actions = [];
+    if (SP.auth.can('warehouses:manage')) {
+      actions.push(SP.el('button.btn.btn--primary.btn--sm', { type: 'button', onclick: () => editWarehouse(null) }, SP.icon('plus'), 'New warehouse'));
     }
+    root.appendChild(SP.ui2.pageHead({ title: 'Warehouses', sub: 'Company → warehouse → zone → rack → shelf → bin.', actions }));
 
-    /* ── Rebalance suggestions ────────────────────────────────────── */
-    const moves = rebalanceSuggestions();
-    root.appendChild(SP.section('Rebalance suggestions', 'Free moves that would close the biggest gaps',
-      moves.length ? SP.el('div.stacklist', ...moves.slice(0, 5).map(moveCard))
-        : SP.el('div.card', SP.empty({
-          icon: 'checkCircle',
-          title: 'The network is balanced',
-          body: 'No site is holding a surplus that another site needs.',
-        })),
-    ));
-
-    const t = SP.TIPS_BY_ID('transfer');
-    const tip = t ? SP.tip(t) : null;
-    if (tip) root.appendChild(tip);
-
+    const grid = SP.el('div.grid.grid--2.gap-3');
+    for (const w of s.warehouses) {
+      const sum = SP.ledger.summary({ warehouse: w.id });
+      const locs = s.locations.filter((l) => l.warehouseId === w.id);
+      const usedBins = new Set(s.devices.filter((d) => d.warehouseId === w.id && d.locationId).map((d) => d.locationId));
+      grid.appendChild(SP.el('button.card.card--pad.whcard', { type: 'button', onclick: () => SP.router.go('warehouses', { id: w.id }) },
+        SP.el('div.row', { style: { alignItems: 'center', gap: 'var(--sp-2)' } },
+          SP.el('span.lrow__ico', { style: { background: `${(w.color || '#5b8cff')}22`, color: w.color || '#5b8cff' } }, SP.icon('home')),
+          SP.el('div.grow', SP.el('strong', w.name), SP.el('small.mute', { style: { display: 'block' } }, [w.type, w.address].filter(Boolean).join(' · ') || '—')),
+          w.active ? null : SP.ui2.tag('Inactive', 'mute')),
+        SP.el('div.whcard__stats',
+          SP.el('div', SP.el('b', SP.fmt.n(sum.gross)), SP.el('span', 'units')),
+          SP.auth.can('cost:view') ? SP.el('div', SP.el('b', SP.fmt.moneyCompact(sum.value)), SP.el('span', 'value')) : null,
+          SP.el('div', SP.el('b', { style: { color: sum.critical ? 'var(--danger)' : undefined } }, SP.fmt.n(sum.critical)), SP.el('span', 'out')),
+          SP.el('div', SP.el('b', SP.fmt.n(locs.length)), SP.el('span', 'locations')),
+        ),
+        w.capacity ? SP.el('div.meter', SP.el('div.meter__bar',
+          SP.el('i', { class: 'on', style: { width: `${Math.min(100, usedBins.size / w.capacity * 100)}%` } })),
+          SP.el('span.meter__text', `Capacity ${usedBins.size}/${w.capacity}`)) : null,
+      ));
+    }
+    root.appendChild(grid);
     return root;
   }
 
-  /* ────────────────────────────────────────────────────────── pieces */
+  /* ────────────────────────────────────────────────────────── detail */
 
-  function siteCard(w, maxUnits) {
-    return SP.el('button.stat', {
-      type: 'button',
-      style: { borderColor: state.selected === w.id ? w.color : undefined },
-      onclick: () => { state.selected = state.selected === w.id ? null : w.id; SP.router.refresh(); },
-    },
-      SP.el('div.stat__label',
-        SP.el('i', { style: { width: '8px', height: '8px', borderRadius: '50%', background: w.color } }),
-        w.label),
-      SP.el('div.stat__value', SP.fmt.n(w.units)),
-      SP.el('div.stat__foot', `${SP.fmt.pct(w.share)} of network · ${SP.fmt.pluralise(w.skus, 'SKU')}`),
-      SP.el('div.bar', { style: { marginTop: '6px' } },
-        SP.el('i', { style: { width: `${Math.max(2, (w.units / maxUnits) * 100)}%`, background: w.color } })),
-      SP.el('div.row.gap-1', { style: { marginTop: '8px', flexWrap: 'wrap' } },
-        w.critical ? SP.el('span.tag.tag--u-red', `${w.critical} out`) : null,
-        w.refill ? SP.el('span.tag.tag--u-amber', `${w.refill} refill`) : null,
-        !w.critical && !w.refill && w.units ? SP.el('span.tag.tag--u-green', 'Healthy') : null,
-        !w.units ? SP.el('span.tag.tag--mute', 'Empty') : null,
-      ),
-    );
+  function detail(id) {
+    const w = SP.store.state.warehouses.find((x) => x.id === id);
+    if (!w) return SP.empty({ icon: 'home', title: 'Warehouse not found', action: { label: 'All warehouses', onClick: () => SP.router.go('warehouses') } });
+    const s = SP.store.state;
+    const sum = SP.ledger.summary({ warehouse: id });
+    const root = SP.el('div.stack.gap-4');
+
+    root.appendChild(SP.ui2.pageHead({
+      title: w.name, sub: [w.address, w.phone].filter(Boolean).join(' · ') || w.code,
+      actions: [
+        SP.auth.can('warehouses:manage') ? SP.el('button.btn.btn--ghost.btn--sm', { type: 'button', onclick: () => editWarehouse(w) }, SP.icon('edit'), 'Edit') : null,
+        SP.el('button.btn.btn--ghost.btn--sm', { type: 'button', onclick: () => SP.router.go('locations', { wh: id }) }, SP.icon('pin'), 'Locations'),
+      ],
+    }));
+
+    root.appendChild(SP.el('div.kpi-grid',
+      SP.ui2.kpi({ label: 'Units on hand', value: SP.fmt.n(sum.gross), icon: 'box' }),
+      SP.auth.can('cost:view') ? SP.ui2.kpi({ label: 'Stock value', value: SP.fmt.moneyCompact(sum.value), icon: 'database' }) : null,
+      SP.ui2.kpi({ label: 'In transit', value: SP.fmt.n(sum.inTransit), icon: 'swap' }),
+      SP.ui2.kpi({ label: 'Out of stock', value: SP.fmt.n(sum.critical), tone: sum.critical ? 'danger' : null, icon: 'alert' }),
+    ));
+
+    /* top stock at this warehouse */
+    const map = SP.ledger.stockMap(id);
+    const top = [...map.entries()].filter(([, q]) => q > 0)
+      .map(([pid, qty]) => ({ p: s.products.find((x) => x.id === pid), qty }))
+      .filter((r) => r.p).sort((a, b) => b.qty - a.qty).slice(0, 15);
+
+    root.appendChild(SP.el('div.grid.grid--2.gap-3',
+      SP.el('div.card.card--pad',
+        SP.el('div.row', { style: { justifyContent: 'space-between', marginBottom: 'var(--sp-2)' } },
+          SP.el('strong', 'Largest holdings'),
+          SP.el('button.btn.btn--quiet.btn--sm', { type: 'button', onclick: () => SP.router.go('inventory', { wh: id }) }, 'Full inventory')),
+        top.length ? SP.ui2.hbars(top.map((r) => ({ label: r.p.name, value: r.qty, color: w.color || '#5b8cff' }))) : SP.el('p.tiny.mute', 'No stock here yet.')),
+      SP.el('div.card.card--pad',
+        SP.el('strong', { style: { display: 'block', marginBottom: 'var(--sp-2)' } }, 'Locations'),
+        (() => {
+          const locs = s.locations.filter((l) => l.warehouseId === id);
+          if (!locs.length) return SP.empty({ icon: 'pin', title: 'No locations', body: 'Create zones, racks, shelves and bins.', action: SP.auth.can('warehouses:manage') ? { label: 'Add locations', onClick: () => SP.router.go('locations', { wh: id }) } : null });
+          return SP.el('div.stack.gap-1', ...locs.slice(0, 10).map((l) => SP.el('div.lrow',
+            SP.el('span.lrow__ico', SP.icon('pin')),
+            SP.el('div.lrow__main', SP.el('strong', l.code), SP.el('small', [l.zone && `Zone ${l.zone}`, l.rack && `Rack ${l.rack}`, l.shelf && `Shelf ${l.shelf}`, l.bin && `Bin ${l.bin}`].filter(Boolean).join(' · '))),
+            SP.el('span.tiny.mute', `${s.devices.filter((d) => d.locationId === l.id).length} devices`))));
+        })()),
+    ));
+
+    /* recent activity here */
+    const moves = s.movements.filter((m) => m.warehouseId === id).slice(-10).reverse();
+    root.appendChild(SP.el('div.card.card--pad',
+      SP.el('strong', { style: { display: 'block', marginBottom: 'var(--sp-2)' } }, 'Recent activity'),
+      SP.ui2.timeline(moves.map((m) => ({
+        at: m.ts, tone: SP.movementType(m.type).tone,
+        title: `${SP.movementType(m.type).label} · ${s.products.find((x) => x.id === m.productId)?.name || '?'}`,
+        body: `${m.direction > 0 ? '+' : m.direction < 0 ? '−' : ''}${m.qty} · balance ${m.after}`,
+        meta: `${m.ref} · ${m.by}`,
+      })))));
+    return root;
   }
 
-  function buildBrandStack() {
-    const brands = SP.engine.brandBreakdown().slice(0, 9);
-    return brands.map((b) => {
-      const parts = SP.store.state.warehouses.map((w) => ({
-        label: w.label,
-        value: SP.sum(SP.store.state.skus.filter((s) => s.brand === b.name && !s.archived),
-          (s) => Number(s.byWh?.[w.id]) || 0),
-        colour: w.color,
-      }));
-      return { label: b.name, parts };
+  /* ────────────────────────────────────────────────────────── editor */
+
+  function editWarehouse(w) {
+    const isNew = !w;
+    w = w || { id: null, code: '', name: '', type: 'warehouse', address: '', phone: '', color: '#5b8cff', capacity: 0, active: true };
+    return SP.modal({
+      title: isNew ? 'New warehouse' : `Edit ${w.name}`, icon: 'home',
+      okLabel: isNew ? 'Create' : 'Save',
+      fields: [
+        { key: 'name', label: 'Name', required: true, value: w.name, placeholder: 'e.g. Dhaka Warehouse' },
+        { key: 'code', label: 'Code', required: true, value: w.code, placeholder: 'e.g. DHK' },
+        { key: 'type', label: 'Type', type: 'select', value: w.type, options: [{ value: 'warehouse', label: 'Warehouse' }, { value: 'store', label: 'Store' }, { value: 'van', label: 'Van / mobile' }] },
+        { key: 'address', label: 'Address', value: w.address },
+        { key: 'phone', label: 'Phone', value: w.phone, inputmode: 'tel' },
+        { key: 'capacity', label: 'Capacity (locations)', type: 'number', min: 0, value: w.capacity },
+      ],
+      onOk: async (v) => {
+        const code = String(v.code).trim().toUpperCase();
+        const clash = SP.store.state.warehouses.find((x) => x.code === code && x.id !== w.id);
+        if (clash) throw new Error(`Code ${code} is already used by ${clash.name}.`);
+        if (isNew) {
+          const rec = { id: code, code, name: v.name, type: v.type, address: v.address || '', phone: v.phone || '', managerId: null, color: SP.auth.randomColour(), capacity: v.capacity || 0, active: true, createdAt: Date.now() };
+          SP.store.update(['warehouses'], (s) => { s.warehouses.push(rec); });
+          SP.store.audit('warehouse.create', code, v.name);
+          SP.ui.toast({ tone: 'ok', title: 'Warehouse created' });
+        } else {
+          SP.store.update(['warehouses'], (s) => {
+            const t = s.warehouses.find((x) => x.id === w.id);
+            if (t) Object.assign(t, { name: v.name, code, type: v.type, address: v.address, phone: v.phone, capacity: v.capacity });
+          });
+          SP.store.audit('warehouse.update', code, v.name);
+          SP.ui.toast({ tone: 'ok', title: 'Warehouse saved' });
+        }
+        SP.router.refresh();
+      },
     });
   }
 
-  function siteDetail(whId) {
-    const wh = SP.store.state.warehouses.find((w) => w.id === whId);
-    if (!wh) return SP.el('div');
-    const rows = SP.engine.warehouseBreakdown().find((x) => x.id === whId);
+  return MOD;
+})();
 
-    const skus = SP.store.state.skus
-      .filter((s) => !s.archived)
-      .map((s) => ({ sku: s, qty: Number(s.byWh?.[whId]) || 0 }))
-      .filter((r) => r.qty > 0)
-      .sort((a, b) => b.qty - a.qty);
+/* ══════════════════════════════════════════════════════════ LOCATIONS */
 
-    return SP.el('div.card',
-      SP.el('div.card__head',
-        SP.el('i', { style: { width: '9px', height: '9px', borderRadius: '50%', background: wh.color } }),
-        SP.el('h2', wh.label),
-        SP.el('span.sub', `${SP.fmt.n(rows?.units || 0)} units`),
-        SP.el('button.btn.btn--sm.btn--ghost', {
-          type: 'button', onclick: () => { state.selected = null; SP.router.refresh(); },
-        }, SP.icon('x')),
-      ),
-      SP.el('dl.kv', { style: { padding: '0 var(--sp-4) var(--sp-3)' } },
-        SP.el('dt', 'Custodian'), SP.el('dd', wh.custodian || '—'),
-        SP.el('dt', 'Share of network'), SP.el('dd', SP.fmt.pct(rows?.share || 0)),
-        SP.el('dt', 'Healthy lines'), SP.el('dd', SP.fmt.pct(rows?.health || 0)),
-        SP.el('dt', 'Needs attention'), SP.el('dd', `${(rows?.critical || 0) + (rows?.refill || 0)}`),
-      ),
-      SP.el('div.tablewrap', { style: { maxHeight: '340px', overflowY: 'auto' } },
-        SP.el('table.table.table--compact',
-          SP.el('thead', SP.el('tr',
-            SP.el('th', 'Model'), SP.el('th', 'Spec'),
-            SP.el('th.num', 'Units'), SP.el('th', 'Status'),
-          )),
-          SP.el('tbody', ...(skus.length ? skus.map(({ sku, qty }) => {
-            const u = SP.engine.urgency(qty);
-            return SP.el('tr', { onclick: () => SP.modules.inventory.openSkuSheet(sku.id) },
-              SP.el('td', SP.el('div.cell-main',
-                SP.el('strong', sku.sku), SP.el('small', sku.brand))),
-              SP.el('td', sku.specs),
-              SP.el('td.num', SP.fmt.n(qty)),
-              SP.el('td', SP.urgencyTag(u, { short: true })),
-            );
-          }) : [SP.el('tr', SP.el('td', { colspan: 4 },
-            SP.el('p.mute', { style: { padding: 'var(--sp-4)', textAlign: 'center' } }, 'This site holds no stock.')))])),
-        ),
-      ),
-    );
-  }
+SP.modules.locations = (() => {
+  const state = { warehouse: null };
+  const MOD = { title: 'Locations', subtitle: () => `${SP.fmt.pluralise(SP.store.state.locations.length, 'location')}`, mount, editLocation, relocateForm };
 
-  /* ────────────────────────────────────────────── rebalance engine */
-
-  /**
-   * Pair up surplus with shortage across sites.
-   * Only considers stock above the reorder line as surplus.
-   */
-  function rebalanceSuggestions() {
+  function mount(params) {
+    if (params?.wh) state.warehouse = params.wh;
+    const root = SP.el('div.stack.gap-3');
     const s = SP.store.state;
-    const refillMax = s.rules.refillMax;
-    const out = [];
+    const whId = state.warehouse || s.warehouses[0]?.id;
 
-    const surplus = new Map();  // skuId → [{ wh, qty }]
-    const shortage = new Map();
+    const actions = [];
+    if (SP.auth.can('warehouses:manage')) {
+      actions.push(SP.el('button.btn.btn--primary.btn--sm', { type: 'button', onclick: () => editLocation(null, whId) }, SP.icon('plus'), 'New location'));
+      actions.push(SP.el('button.btn.btn--ghost.btn--sm', { type: 'button', onclick: () => generateGrid(whId) }, SP.icon('layers'), 'Generate grid'));
+    }
+    root.appendChild(SP.ui2.pageHead({ title: 'Locations', sub: 'Zone → Rack → Shelf → Bin', actions }));
 
-    for (const sku of s.skus) {
-      if (sku.archived) continue;
-      for (const w of s.warehouses) {
-        const q = Number(sku.byWh?.[w.id]) || 0;
-        if (q > refillMax) {
-          if (!surplus.has(sku.id)) surplus.set(sku.id, []);
-          surplus.get(sku.id).push({ wh: w.id, qty: q - refillMax });
-        }
-      }
-      const sitesWithStock = s.warehouses.filter((w) => (Number(sku.byWh?.[w.id]) || 0) > 0).length;
-      const emptySites = s.warehouses.length - sitesWithStock;
-      if (emptySites > 0 || SP.engine.totalOf(sku) <= refillMax) {
-        if (!shortage.has(sku.id)) shortage.set(sku.id, []);
-        for (const w of s.warehouses) {
-          const q = Number(sku.byWh?.[w.id]) || 0;
-          if (q === 0) shortage.get(sku.id).push({ wh: w.id, need: refillMax });
-        }
-      }
+    const locs = s.locations.filter((l) => l.warehouseId === whId);
+    const grouped = SP.groupBy(locs, (l) => l.zone || '—');
+
+    root.appendChild(SP.el('div.row.gap-2', SP.ui2.warehouseSelect({
+      value: whId, allowAll: false, onChange: (v) => { state.warehouse = v; SP.router.refresh(); },
+    })));
+
+    if (!locs.length) {
+      root.appendChild(SP.empty({
+        icon: 'pin', title: 'No locations yet',
+        body: 'Create individual locations or generate a zone/rack/shelf/bin grid in one go.',
+        action: SP.auth.can('warehouses:manage') ? { label: 'Generate a grid', onClick: () => generateGrid(whId) } : null,
+      }));
+      return root;
     }
 
-    for (const [skuId, froms] of surplus) {
-      const needs = shortage.get(skuId);
-      if (!needs || !needs.length) continue;
-      for (const f of froms) {
-        for (const n of needs) {
-          if (f.wh === n.wh) continue;
-          const qty = Math.min(f.qty, n.need);
-          if (qty <= 0) continue;
-          const sku = s.skus.find((x) => x.id === skuId);
-          out.push({
-            skuId,
-            from: f.wh,
-            to: n.wh,
-            qty,
-            sku,
-            saving: qty * (sku.cost || SP.costFor(sku)),
+    for (const [zone, list] of Object.entries(grouped)) {
+      root.appendChild(SP.el('section.section',
+        SP.el('div.section__head', SP.el('div.grow', SP.el('h2', `Zone ${zone}`), SP.el('p', `${list.length} locations`))),
+        SP.el('div.grid.grid--3.gap-2', ...list.map((l) => {
+          const devices = s.devices.filter((d) => d.locationId === l.id);
+          return SP.el('button.card.card--pad', { type: 'button', style: { textAlign: 'left' }, onclick: () => locationSheet(l) },
+            SP.el('div.row', { style: { justifyContent: 'space-between' } },
+              SP.el('strong', l.code),
+              SP.el('span.tiny.mute', `${devices.length} devices`)),
+            SP.el('small.mute', [l.rack && `Rack ${l.rack}`, l.shelf && `Shelf ${l.shelf}`, l.bin && `Bin ${l.bin}`].filter(Boolean).join(' · ') || '—'));
+        }))));
+    }
+    return root;
+  }
+
+  function locationSheet(l) {
+    const s = SP.store.state;
+    const devices = s.devices.filter((d) => d.locationId === l.id);
+    const shell = SP.sheet({
+      title: l.code,
+      subtitle: s.warehouses.find((w) => w.id === l.warehouseId)?.name,
+      content: SP.el('div.stack.gap-2',
+        SP.el('dl.kv',
+          SP.el('dt', 'Zone / Rack / Shelf / Bin'), SP.el('dd', [l.zone, l.rack, l.shelf, l.bin].filter(Boolean).join(' / ') || '—'),
+          SP.el('dt', 'Devices stored'), SP.el('dd', SP.fmt.n(devices.length))),
+        devices.length ? SP.el('div.stack.gap-1', ...devices.slice(0, 20).map((d) => {
+          const p = s.products.find((x) => x.id === d.productId);
+          return SP.el('button.lrow', { type: 'button', onclick: () => { shell.close(); SP.modules.devices.openDevice(d.id); } },
+            SP.el('span.lrow__ico', SP.icon('layers')),
+            SP.el('div.lrow__main', SP.el('strong', d.imei1 || d.serial), SP.el('small', p?.name || '')),
+            SP.ui2.tag(SP.deviceStatus(d.status).label, SP.deviceStatus(d.status).tone));
+        })) : SP.el('p.tiny.mute', 'No devices at this location.')),
+      actions: SP.auth.can('warehouses:manage') ? [
+        SP.el('button.btn.btn--ghost', { type: 'button', onclick: () => { shell.close(); editLocation(l, l.warehouseId); } }, SP.icon('edit'), 'Edit'),
+        SP.el('button.btn.btn--danger', {
+          type: 'button',
+          onclick: async () => {
+            if (devices.length) { SP.ui.toast({ tone: 'warn', title: 'Location not empty', body: 'Relocate devices first.' }); return; }
+            const ok = await SP.modal({ title: `Delete ${l.code}?`, body: 'This cannot be undone.', tone: 'danger', okLabel: 'Delete' });
+            if (!ok) return;
+            SP.store.update(['locations'], (st) => { st.locations = st.locations.filter((x) => x.id !== l.id); });
+            SP.store.audit('location.delete', l.code, '');
+            shell.close(); SP.router.refresh();
+          },
+        }, SP.icon('trash'), 'Delete'),
+      ] : null,
+    });
+  }
+
+  function editLocation(l, warehouseId) {
+    const isNew = !l;
+    l = l || { id: null, warehouseId, zone: '', rack: '', shelf: '', bin: '', capacity: 0 };
+    return SP.modal({
+      title: isNew ? 'New location' : `Edit ${l.code}`, icon: 'pin',
+      okLabel: isNew ? 'Create' : 'Save',
+      fields: [
+        { key: 'zone', label: 'Zone', value: l.zone, placeholder: 'A' },
+        { key: 'rack', label: 'Rack', value: l.rack, placeholder: '01' },
+        { key: 'shelf', label: 'Shelf', value: l.shelf, placeholder: '02' },
+        { key: 'bin', label: 'Bin', value: l.bin, placeholder: '05' },
+      ],
+      onOk: async (v) => {
+        const code = [v.zone && `Z${v.zone}`, v.rack && `R${v.rack}`, v.shelf && `S${v.shelf}`, v.bin && `B${v.bin}`].filter(Boolean).join('-') || 'LOC';
+        if (isNew) {
+          SP.store.update(['locations'], (s) => {
+            s.locations.push({ id: SP.uid('loc'), warehouseId, zone: v.zone || '', rack: v.rack || '', shelf: v.shelf || '', bin: v.bin || '', code, capacity: 0, notes: '' });
           });
+          SP.store.audit('location.create', code, warehouseId);
+        } else {
+          SP.store.update(['locations'], (s) => {
+            const t = s.locations.find((x) => x.id === l.id);
+            if (t) Object.assign(t, { zone: v.zone, rack: v.rack, shelf: v.shelf, bin: v.bin, code });
+          });
+          SP.store.audit('location.update', code, '');
         }
-      }
-    }
-
-    return out.sort((a, b) => b.saving - a.saving);
+        SP.router.refresh();
+      },
+    });
   }
 
-  function moveCard(m) {
-    const from = SP.store.state.warehouses.find((w) => w.id === m.from);
-    const to = SP.store.state.warehouses.find((w) => w.id === m.to);
-    return SP.el('div.insight', { dataset: { tone: 'ok' } },
-      SP.el('span.insight__ico', SP.icon('swap')),
-      SP.el('div.insight__body',
-        SP.el('strong', `Move ${SP.fmt.n(m.qty)} × ${m.sku.sku} ${m.sku.specs}`),
-        SP.el('p', `${from?.short || m.from} → ${to?.short || m.to} · avoids ${SP.fmt.money(m.saving)} of purchasing`),
-        SP.el('div.insight__act',
-          SP.el('button.btn.btn--sm.btn--ghost', {
-            type: 'button',
-            onclick: () => SP.modules.transfers.openForm({
-              skuId: m.skuId, from: m.from, to: m.to, qty: m.qty,
-            }),
-          }, 'Create transfer'),
-        ),
-      ),
-    );
+  function generateGrid(warehouseId) {
+    return SP.modal({
+      title: 'Generate a location grid',
+      subtitle: 'Creates zone/rack/shelf/bin combinations in one go.',
+      icon: 'layers', okLabel: 'Generate',
+      fields: [
+        { key: 'zones', label: 'Zones (comma separated)', value: 'A', required: true, placeholder: 'A,B,C' },
+        { key: 'racks', label: 'Racks per zone', type: 'number', min: 1, max: 99, value: 2, required: true },
+        { key: 'shelves', label: 'Shelves per rack', type: 'number', min: 1, max: 99, value: 2, required: true },
+        { key: 'bins', label: 'Bins per shelf', type: 'number', min: 1, max: 99, value: 3, required: true },
+      ],
+      onOk: async (v) => {
+        const zones = String(v.zones).split(',').map((z) => z.trim()).filter(Boolean);
+        let n = 0;
+        SP.store.update(['locations'], (s) => {
+          for (const z of zones) {
+            for (let r = 1; r <= v.racks; r += 1) {
+              for (let sh = 1; sh <= v.shelves; sh += 1) {
+                for (let b = 1; b <= v.bins; b += 1) {
+                  const pad = (x) => String(x).padStart(2, '0');
+                  const code = `Z${z}-R${pad(r)}-S${pad(sh)}-B${pad(b)}`;
+                  if (s.locations.some((l) => l.warehouseId === warehouseId && l.code === code)) continue;
+                  s.locations.push({ id: SP.uid('loc'), warehouseId, zone: z, rack: pad(r), shelf: pad(sh), bin: pad(b), code, capacity: 0, notes: '' });
+                  n += 1;
+                }
+              }
+            }
+          }
+        });
+        SP.store.audit('location.generate', `${n} locations`, warehouseId);
+        SP.ui.toast({ tone: 'ok', title: `${n} locations created` });
+        SP.router.refresh();
+      },
+    });
   }
 
-  return { ...MOD, rebalanceSuggestions };
+  /** Move devices to a different location. */
+  async function relocateForm(deviceIds) {
+    const s = SP.store.state;
+    const res = await SP.modal({
+      title: `Relocate ${deviceIds.length} device${deviceIds.length === 1 ? '' : 's'}`, icon: 'pin', okLabel: 'Relocate',
+      fields: [{
+        key: 'locationId', label: 'Destination', type: 'select', required: true,
+        options: s.locations.map((l) => ({ value: l.id, label: `${s.warehouses.find((w) => w.id === l.warehouseId)?.code || ''} · ${l.code}` })),
+      }],
+      onOk: async (v) => {
+        const loc = s.locations.find((x) => x.id === v.locationId);
+        SP.store.update(['devices'], (st) => {
+          for (const id of deviceIds) {
+            const d = st.devices.find((x) => x.id === id);
+            if (d) { d.locationId = v.locationId; d.warehouseId = loc.warehouseId; d.updatedAt = Date.now(); }
+          }
+        });
+        SP.store.audit('location.relocate', `${deviceIds.length} devices`, `→ ${loc.code}`);
+        SP.ui.toast({ tone: 'ok', title: 'Relocated', body: `→ ${loc.code}` });
+      },
+    });
+    return res;
+  }
+
+  return MOD;
 })();
