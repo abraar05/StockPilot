@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">StockPilot</string>
+    <string name="title_activity_main">StockPilot</string>
+    <string name="package_name">app.stockpilot.inventory</string>
+    <string name="custom_url_scheme">app.stockpilot.inventory</string>
+</resources>

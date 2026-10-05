@@ -1,0 +1,27 @@
+{
+  "name": "StockPilot — Inventory Intelligence",
+  "short_name": "StockPilot",
+  "description": "Multi-warehouse inventory intelligence, refill decisions and purchase planning.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0a0d13",
+  "theme_color": "#0b0e14",
+  "categories": ["business", "productivity", "utilities"],
+  "lang": "en",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "Refill Radar", "short_name": "Refill", "url": "./index.html#/refill" },
+    { "name": "Record dispatch", "short_name": "Dispatch", "url": "./index.html#/sales" },
+    { "name": "Inventory", "short_name": "Stock", "url": "./index.html#/inventory" }
+  ]
+}
